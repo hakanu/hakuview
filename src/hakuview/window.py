@@ -7,8 +7,16 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QRect, QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QDragEnterEvent, QDropEvent, QKeyEvent, QKeySequence
+from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeyEvent,
+    QKeySequence,
+)
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,11 +27,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QWidget,
 )
 
@@ -145,6 +156,42 @@ class HakuViewWindow(QMainWindow):
                 font-size: 12px;
                 spacing: 4px;
             }
+            QToolButton {
+                background-color: #252a34;
+                color: #e2e8f0;
+                border: 1px solid #353c4b;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 13px;
+            }
+            QToolButton:hover {
+                background-color: #323946;
+                border-color: #4b5563;
+            }
+            QMenu {
+                background-color: #1a1d25;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 4px 0;
+                font-size: 12px;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 14px;
+                background-color: transparent;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                color: #64748b;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2b3240;
+                margin: 4px 8px;
+            }
             QStatusBar {
                 background-color: #181b21;
                 color: #94a3b8;
@@ -248,6 +295,18 @@ class HakuViewWindow(QMainWindow):
         self.btn_fit = self._add_tb_button("⊞ Fit (0)", self.canvas.zoom_fit, "Fit image to window")
         self.btn_actual = self._add_tb_button("1:1 (1)", self.canvas.zoom_actual, "Actual pixel size (100%)")
         self.btn_fullscreen = self._add_tb_button("⛶ Fullscreen (F)", self.toggle_fullscreen, "Toggle Fullscreen (F or F11)")
+
+        # Spacer & 3-dots More Options button
+        spacer = QWidget(self)
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.toolbar.addWidget(spacer)
+
+        self.btn_more = QPushButton("⋮", self)
+        self.btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_more.setToolTip("More Options (3 dots menu)")
+        self.btn_more.setStyleSheet("font-weight: bold; font-size: 16px; padding: 2px 9px;")
+        self.btn_more.clicked.connect(lambda: self.show_more_options_menu(self.btn_more))
+        self.toolbar.addWidget(self.btn_more)
 
         # Status Bar
         self.status = QStatusBar(self)
@@ -951,3 +1010,149 @@ class HakuViewWindow(QMainWindow):
             return
         self.video_view.stop()
         super().closeEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._hook_toolbar_extension()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._hook_toolbar_extension()
+
+    def _hook_toolbar_extension(self) -> None:
+        if not hasattr(self, "toolbar"):
+            return
+        ext = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+        if ext and not getattr(ext, "_hooked", False):
+            ext._hooked = True
+            ext.setToolTip("More Options (3 dots menu)")
+            ext.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        if hasattr(self, "toolbar") and event.type() in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonDblClick,
+        ):
+            ext = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+            if watched is ext:
+                self.show_more_options_menu(anchor_widget=ext)
+                return True
+        return super().eventFilter(watched, event)
+
+    def show_more_options_menu(self, anchor_widget: Optional[QWidget] = None) -> None:
+        menu = QMenu(self)
+        is_img = not self.current_is_video and self.document is not None
+        has_file = self.navigator.current_file is not None
+        modified = bool(is_img and self.document and self.document.modified)
+
+        # File actions
+        menu.addAction("📂 Open File... (O)", self.open_file_dialog)
+        act_save = menu.addAction("💾 Save (Ctrl+S)", self.save_current)
+        act_save.setEnabled(modified)
+        act_save_as = menu.addAction("💾 Save As... (Ctrl+Shift+S)", self.save_as_dialog)
+        act_save_as.setEnabled(is_img)
+        act_del = menu.addAction("🗑 Delete File (Delete)", self.delete_current_file)
+        act_del.setEnabled(has_file)
+
+        menu.addSeparator()
+
+        # Image Compression
+        act_compress = menu.addAction("🗜 Compress Variant (K)", self.compress_current_variant)
+        act_compress.setEnabled(is_img)
+
+        compress_submenu = menu.addMenu("🎯 Compression Preset")
+        group = QActionGroup(compress_submenu)
+        group.setExclusive(True)
+        cur_mode = str(self.combo_compress.currentData() or "lossless")
+        for idx, (label, mode_id) in enumerate(COMPRESSION_MODES):
+            mode_act = compress_submenu.addAction(label)
+            mode_act.setCheckable(True)
+            mode_act.setChecked(mode_id == cur_mode)
+            group.addAction(mode_act)
+
+            def _make_setter(index: int):
+                return lambda: self.combo_compress.setCurrentIndex(index)
+
+            mode_act.triggered.connect(_make_setter(idx))
+
+        menu.addSeparator()
+
+        # Image operations
+        act_crop = menu.addAction("✂ Border Crop (C)", self.trigger_crop_action)
+        act_crop.setEnabled(is_img)
+        act_rotl = menu.addAction("↺ Rotate Left 90° (L)", self.rotate_left)
+        act_rotl.setEnabled(is_img)
+        act_rotr = menu.addAction("↻ Rotate Right 90° (R)", self.rotate_right)
+        act_rotr.setEnabled(is_img)
+        act_fliph = menu.addAction("⇆ Flip Horizontal (H)", self.flip_horizontal)
+        act_fliph.setEnabled(is_img)
+        act_flipv = menu.addAction("⇅ Flip Vertical (V)", self.flip_vertical)
+        act_flipv.setEnabled(is_img)
+        act_undo = menu.addAction("↶ Undo Edit (Ctrl+Z)", self.undo_edit)
+        act_undo.setEnabled(modified)
+
+        menu.addSeparator()
+
+        # Navigation & View
+        act_rand = menu.addAction("🎲 Random File (Ctrl+M)", self.random_item)
+        act_rand.setEnabled(self.navigator.count > 1)
+        act_slide = menu.addAction("▶ Slideshow (W or F5)", self.toggle_slideshow)
+        act_slide.setCheckable(True)
+        act_slide.setChecked(self.slideshow_active)
+        act_fit = menu.addAction("⊞ Fit to Window (0)", self.canvas.zoom_fit)
+        act_fit.setEnabled(is_img)
+        act_act = menu.addAction("1:1 Actual Size (1)", self.canvas.zoom_actual)
+        act_act.setEnabled(is_img)
+        act_fs = menu.addAction("⛶ Fullscreen (F)", self.toggle_fullscreen)
+        act_info = menu.addAction("ℹ File Info HUD (I)", self.toggle_info_overlay)
+        act_info.setEnabled(has_file)
+
+        menu.addSeparator()
+        menu.addAction("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog)
+        menu.addAction("🦉 About HakuView...", self.show_about_dialog)
+
+        # Show menu positioned under the anchor
+        anchor = anchor_widget or getattr(self, "btn_more", None)
+        if anchor:
+            pos = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        else:
+            pos = self.mapToGlobal(QPoint(self.width() - 200, 30))
+        menu.exec(pos)
+
+    def show_shortcuts_dialog(self) -> None:
+        msg = (
+            "<h3>HakuView Keyboard & Mouse Shortcuts</h3>"
+            "<table cellpadding='4' style='font-size: 13px;'>"
+            "<tr><td><b>← / →</b></td><td>Previous / Next file in folder</td></tr>"
+            "<tr><td><b>Ctrl + M</b></td><td>Jump to random file in folder</td></tr>"
+            "<tr><td><b>C</b></td><td>Border Crop (drag borders & press C or Enter)</td></tr>"
+            "<tr><td><b>R / L</b></td><td>Rotate 90° Right / Left</td></tr>"
+            "<tr><td><b>H / V</b></td><td>Flip Horizontal / Vertical</td></tr>"
+            "<tr><td><b>K</b></td><td>1-Click Compress & save as variant</td></tr>"
+            "<tr><td><b>Ctrl + Z</b></td><td>Undo last edit</td></tr>"
+            "<tr><td><b>Ctrl + S</b></td><td>Save changes (atomic in-place)</td></tr>"
+            "<tr><td><b>Ctrl + Shift + S</b></td><td>Save As...</td></tr>"
+            "<tr><td><b>W or F5</b></td><td>Toggle Slideshow ([ and ] for speed)</td></tr>"
+            "<tr><td><b>F or Double-Click</b></td><td>Toggle Fullscreen</td></tr>"
+            "<tr><td><b>+ / - or Wheel</b></td><td>Zoom (centered at mouse)</td></tr>"
+            "<tr><td><b>0 / 1</b></td><td>Fit to window / 100% 1:1 size</td></tr>"
+            "<tr><td><b>Space or Click</b></td><td>Play / Pause video (or pan image)</td></tr>"
+            "<tr><td><b>Ctrl + W / Esc</b></td><td>Close window / Exit fullscreen</td></tr>"
+            "</table>"
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("Keyboard Shortcuts — HakuView")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(msg)
+        box.exec()
+
+    def show_about_dialog(self) -> None:
+        QMessageBox.about(
+            self,
+            f"About {__app_name__}",
+            f"<b>{__app_name__} v{__version__}</b><br><br>"
+            "Ultra-fast, lightweight IrfanView-inspired image & video viewer for Ubuntu & Windows.<br><br>"
+            "Features: Instant middle-of-folder cycling, border crop, rotate, 1-click compression, "
+            "hardware-accelerated video playback, and non-blocking slideshows.<br><br>"
+            "MIT License",
+        )

@@ -226,3 +226,22 @@ def test_slideshow_cycles_through_videos(tmp_path: Path, qtbot) -> None:
     # Video completion signal also advances immediately
     win._on_video_finished_in_slideshow()
     assert win.navigator.current_file == tmp_path / "img2.png"
+
+
+def test_more_options_menu_and_toolbar_extension(tmp_path: Path, qtbot) -> None:
+    _create_sample_image(tmp_path / "img1.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    win.show()
+
+    assert hasattr(win, "btn_more")
+    assert win.btn_more.text() == "⋮"
+
+    # Verify menu action
+    called = []
+    win.show_more_options_menu = lambda anchor=None: called.append(True)
+    win.btn_more.click()
+    assert len(called) == 1
+
+    # Verify extension hook
+    win._hook_toolbar_extension()
