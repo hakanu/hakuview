@@ -453,3 +453,92 @@ def test_media_info_dialog_and_extraction(tmp_path: Path, qtbot) -> None:
     win.show()
     assert hasattr(win, "btn_info")
     assert win.btn_info.isEnabled()
+
+
+def test_color_scaling_adjustments_and_save_new_image(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtGui import QColor
+
+    img_path = tmp_path / "original_photo.png"
+    _create_sample_image(img_path, width=100, height=80, color=QColor(100, 100, 100))
+    orig_bytes = img_path.read_bytes()
+
+    win = HakuViewWindow(initial_path=img_path)
+    qtbot.addWidget(win)
+    win.show()
+
+    # Toolbar has Color button, no random button
+    assert hasattr(win, "btn_color")
+    assert not hasattr(win, "btn_random")
+    assert not win.color_bar.isVisible()
+
+    # Toggle color bar
+    win.toggle_color_bar()
+    assert win.color_bar.isVisible()
+    assert win.btn_color.isChecked()
+
+    # Adjust brightness and contrast
+    win.slider_brightness.setValue(25)
+    win.slider_contrast.setValue(15)
+    assert win.color_brightness == 25
+    assert win.color_contrast == 15
+    assert win.lbl_b_val.text() == "+25"
+    assert win.lbl_c_val.text() == "+15"
+
+    # Saving must save as a NEW image and not overwrite original
+    new_path = win.save_adjusted_image()
+    assert new_path is not None
+    assert new_path.exists()
+    assert new_path != img_path
+    assert "color" in new_path.name
+    # Original is untouched
+    assert img_path.read_bytes() == orig_bytes
+
+    # Reset returns to neutral 0
+    win.reset_color_adjustments()
+    assert win.color_brightness == 0
+    assert win.color_contrast == 0
+    assert win.lbl_b_val.text() == "0"
+    assert win.lbl_c_val.text() == "0"
+
+
+def test_random_moved_to_more_options_menu(tmp_path: Path, qtbot) -> None:
+    _create_sample_image(tmp_path / "img1.png")
+    _create_sample_image(tmp_path / "img2.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    win.show()
+
+    # Random is under 3 dots menu
+    menu = win.show_more_options_menu(exec_menu=False)
+    actions = [a.text() for a in menu.actions()]
+    assert any("Random File" in t for t in actions)
+    assert any("Color Scaling" in t for t in actions)
+
+
+def test_video_color_scaling_and_frame_save(tmp_path: Path, qtbot) -> None:
+    vid_path = tmp_path / "clip.mp4"
+    vid_path.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    win = HakuViewWindow(initial_path=vid_path)
+    qtbot.addWidget(win)
+    win.show()
+
+    assert win.current_is_video
+    assert hasattr(win.video_view.video_widget, "color_overlay")
+
+    # Apply color adjustment to video
+    win.slider_brightness.setValue(30)
+    win.slider_contrast.setValue(20)
+    assert win.video_view.video_widget.color_overlay.brightness == 30
+    assert win.video_view.video_widget.color_overlay.contrast == 20
+
+    # Mock frame grabber to test save_adjusted_image on video
+    sample_frame = QImage(64, 64, QImage.Format.Format_RGB32)
+    sample_frame.fill(QColor(100, 100, 100))
+    win.video_view.grab_current_frame = lambda: sample_frame
+
+    saved_frame_path = win.save_adjusted_image()
+    assert saved_frame_path is not None
+    assert saved_frame_path.exists()
+    assert "frame_" in saved_frame_path.name
+    assert "color" in saved_frame_path.name

@@ -127,6 +127,42 @@ def _qimage_to_pil(image: QImage) -> Image.Image:
     return pil_img
 
 
+def adjust_qimage_color(image: QImage, brightness: int, contrast: int) -> QImage:
+    """Adjust brightness and contrast of a QImage using an optimized 256-value LUT.
+
+    Args:
+        image: Source QImage.
+        brightness: Offset from -100 to 100 (0 is neutral).
+        contrast: Contrast factor from -100 to 100 (0 is neutral).
+    """
+    if brightness == 0 and contrast == 0:
+        return image
+
+    c = max(-99, min(99, int(contrast))) * 2.55
+    factor = (259.0 * (c + 255.0)) / (255.0 * (259.0 - c))
+    b_offset = float(brightness) * 1.28
+
+    lut = [max(0, min(255, int(round(factor * (x - 128.0 + b_offset) + 128.0)))) for x in range(256)]
+
+    pil_img = _qimage_to_pil(image)
+    if pil_img.mode == "RGBA":
+        r, g, b, a = pil_img.split()
+        r = r.point(lut)
+        g = g.point(lut)
+        b = b.point(lut)
+        adj_pil = Image.merge("RGBA", (r, g, b, a))
+    elif pil_img.mode == "RGB":
+        adj_pil = pil_img.point(lut * 3)
+    else:
+        rgb = pil_img.convert("RGB")
+        adj_pil = rgb.point(lut * 3)
+
+    data = adj_pil.tobytes("raw", adj_pil.mode)
+    fmt = QImage.Format.Format_RGBA8888 if adj_pil.mode == "RGBA" else QImage.Format.Format_RGB888
+    bpl = adj_pil.width * (4 if adj_pil.mode == "RGBA" else 3)
+    return QImage(data, adj_pil.width, adj_pil.height, bpl, fmt).copy()
+
+
 def _next_variant_path(source_path: Path, tag: str, ext: str) -> Path:
     """Generate a unique variant filename in the same folder without overwriting existing files."""
     if not ext.startswith("."):

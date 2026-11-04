@@ -47,6 +47,8 @@ hakuview --update
   Plays MP4, MKV, WebM, MOV, and animated GIFs without switching apps. During slideshows, videos play to completion before auto-advancing.
 - ✂️ **Lossless Video Trimming (`[` / `]` or `I` / `O` + `T`)**  
   Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, then press `T` or click **✂ Trim**. Uses instant FFmpeg stream copy with zero re-encoding and zero quality loss.
+- 🎨 **Color Scaling: Brightness & Contrast (`B`)**  
+  Toggles real-time brightness and contrast sliders for both images and videos. Saving always saves as a new image without altering or overwriting original media.
 - ℹ️ **Geeky Media Inspector (`I` / `Ctrl+I`)**  
   Opens a detailed technical card showing true compression ratios, video/audio bitrates, bits-per-pixel (BPP) efficiency, container profiles, and camera EXIF data with 1-click clipboard export.
 
@@ -57,14 +59,15 @@ hakuview --update
 | Key | Action |
 | :--- | :--- |
 | `←` / `→` | Previous / Next file in folder |
-| `Ctrl + M` | Jump to a random file |
+| `Ctrl + M` | Jump to a random file (also under `⋮` More Options) |
 | `C` | **Border Crop** (drag borders inward, then press `C` or `Enter` to commit) |
+| `B` | **Color Scaling** (Live brightness & contrast sliders for images and videos) |
 | `R` / `L` | Rotate 90° Right / Left |
 | `H` / `V` | Flip Horizontal / Vertical |
 | `K` | **1-Click Compress** & save variant |
 | `I` or `Ctrl + I` | **Media Inspector / Info Card** (Bitrate, Compression ratio, Codecs, EXIF) |
 | `Ctrl + Z` | Undo last edit |
-| `Ctrl + S` | Save changes |
+| `Ctrl + S` | Save changes (saves as new image if color scaling is active) |
 | `[ / I` and `] / O` | **Mark Video In / Out points** for trimming |
 | `T` | **Export Trimmed Video** (Instant lossless stream copy) |
 | `W` or `F5` | Toggle Slideshow (`[` and `]` change speed during photo view) |

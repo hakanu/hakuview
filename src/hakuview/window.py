@@ -34,10 +34,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QStackedWidget,
     QStatusBar,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -48,7 +50,9 @@ from .image_ops import (
     COMPRESSION_MODES,
     ImageDocument,
     ImagePreloadCache,
+    adjust_qimage_color,
     compress_image_as_variant,
+    _next_variant_path,
     save_qimage_atomic,
 )
 from .installer import ensure_hakuview_ico
@@ -105,6 +109,8 @@ class HakuViewWindow(QMainWindow):
         self.current_is_video: bool = False
         self._info_visible: bool = False
         self._prompt_unsaved: bool = True
+        self.color_brightness: int = 0
+        self.color_contrast: int = 0
 
         # Slideshow state
         self.slideshow_active: bool = False
@@ -290,7 +296,17 @@ class HakuViewWindow(QMainWindow):
         self.video_view = VideoPlayerWidget(self)
         self.stack.addWidget(self.canvas)
         self.stack.addWidget(self.video_view)
-        self.setCentralWidget(self.stack)
+
+        # Color Adjustment Bar
+        self._build_color_bar()
+
+        central_container = QWidget(self)
+        c_layout = QVBoxLayout(central_container)
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.setSpacing(0)
+        c_layout.addWidget(self.color_bar)
+        c_layout.addWidget(self.stack, stretch=1)
+        self.setCentralWidget(central_container)
 
         self.canvas.zoomChanged.connect(self._on_zoom_changed)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
@@ -310,7 +326,6 @@ class HakuViewWindow(QMainWindow):
         self.btn_open = self._add_tb_button("📂 Open (O)", self.open_file_dialog, "Open an image or video file")
         self.btn_prev = self._add_tb_button("◀ Prev (←)", self.prev_item, "Previous file in folder")
         self.btn_next = self._add_tb_button("Next (→) ▶", self.next_item, "Next file in folder")
-        self.btn_random = self._add_tb_button("🎲 Random (Ctrl+M)", self.random_item, "Jump to a random file in folder")
 
         self.toolbar.addSeparator()
 
@@ -323,6 +338,12 @@ class HakuViewWindow(QMainWindow):
             "Press C to show border crop handles (or drag a box), then press C or Enter to apply crop",
         )
         self.btn_crop.setEnabled(False)
+        self.btn_color = self._add_tb_button(
+            "🎨 Color (B)",
+            self.toggle_color_bar,
+            "Color Scaling: adjust brightness & contrast for images and videos (Shortcut: B)",
+            checkable=True,
+        )
         self.btn_undo = self._add_tb_button("↶ Undo (Ctrl+Z)", self.undo_edit, "Undo last image edit")
         self.btn_undo.setEnabled(False)
         self.btn_save = self._add_tb_button("💾 Save (Ctrl+S)", self.save_current, "Save changes (Ctrl+Shift+S for Save As)")
@@ -471,6 +492,213 @@ class HakuViewWindow(QMainWindow):
         self.status.addPermanentWidget(self.lbl_dimensions)
         self.status.addPermanentWidget(self.lbl_zoom)
 
+    def _build_color_bar(self) -> None:
+        self.color_bar = QWidget(self)
+        self.color_bar.setObjectName("colorBar")
+        self.color_bar.setStyleSheet(
+            """
+            #colorBar {
+                background-color: #1a1d25;
+                border-bottom: 1px solid #2b303c;
+                padding: 4px 8px;
+            }
+            #colorBar QLabel {
+                color: #94a3b8;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            #colorBar QSlider::groove:horizontal {
+                height: 4px;
+                background: #2b3240;
+                border-radius: 2px;
+            }
+            #colorBar QSlider::sub-page:horizontal {
+                background: #0284c7;
+                border-radius: 2px;
+            }
+            #colorBar QSlider::handle:horizontal {
+                background: #38bdf8;
+                width: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
+            }
+            #colorBar QPushButton {
+                background-color: #252a34;
+                color: #e2e8f0;
+                border: 1px solid #353c4b;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 11px;
+            }
+            #colorBar QPushButton:hover {
+                background-color: #323946;
+                border-color: #4b5563;
+            }
+            #colorBar QPushButton#btnSaveAdj {
+                background-color: #0284c7;
+                color: #ffffff;
+                border-color: #38bdf8;
+                font-weight: 500;
+            }
+            #colorBar QPushButton#btnSaveAdj:hover {
+                background-color: #0369a1;
+            }
+            """
+        )
+        cb_layout = QHBoxLayout(self.color_bar)
+        cb_layout.setContentsMargins(8, 3, 8, 3)
+        cb_layout.setSpacing(8)
+
+        lbl_title = QLabel("🎨 Color Scaling:", self.color_bar)
+        lbl_title.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
+        cb_layout.addWidget(lbl_title)
+
+        lbl_b = QLabel("☀️ Brightness:", self.color_bar)
+        cb_layout.addWidget(lbl_b)
+
+        self.slider_brightness = QSlider(Qt.Orientation.Horizontal, self.color_bar)
+        self.slider_brightness.setRange(-100, 100)
+        self.slider_brightness.setValue(0)
+        self.slider_brightness.setFixedWidth(100)
+        self.slider_brightness.setToolTip("Adjust Brightness (-100 to +100)")
+        self.slider_brightness.valueChanged.connect(self._on_color_slider_changed)
+        cb_layout.addWidget(self.slider_brightness)
+
+        self.lbl_b_val = QLabel("0", self.color_bar)
+        self.lbl_b_val.setFixedWidth(28)
+        self.lbl_b_val.setStyleSheet("color: #e2e8f0; font-family: monospace; font-size: 11px;")
+        cb_layout.addWidget(self.lbl_b_val)
+
+        lbl_c = QLabel("◐ Contrast:", self.color_bar)
+        cb_layout.addWidget(lbl_c)
+
+        self.slider_contrast = QSlider(Qt.Orientation.Horizontal, self.color_bar)
+        self.slider_contrast.setRange(-100, 100)
+        self.slider_contrast.setValue(0)
+        self.slider_contrast.setFixedWidth(100)
+        self.slider_contrast.setToolTip("Adjust Contrast (-100 to +100)")
+        self.slider_contrast.valueChanged.connect(self._on_color_slider_changed)
+        cb_layout.addWidget(self.slider_contrast)
+
+        self.lbl_c_val = QLabel("0", self.color_bar)
+        self.lbl_c_val.setFixedWidth(28)
+        self.lbl_c_val.setStyleSheet("color: #e2e8f0; font-family: monospace; font-size: 11px;")
+        cb_layout.addWidget(self.lbl_c_val)
+
+        self.btn_reset_color = QPushButton("↺ Reset", self.color_bar)
+        self.btn_reset_color.setToolTip("Reset brightness & contrast back to 0")
+        self.btn_reset_color.clicked.connect(self.reset_color_adjustments)
+        cb_layout.addWidget(self.btn_reset_color)
+
+        self.btn_save_color = QPushButton("💾 Save as New Image", self.color_bar)
+        self.btn_save_color.setObjectName("btnSaveAdj")
+        self.btn_save_color.setToolTip("Save adjusted image or video frame as a new image file in the current folder (Ctrl+S)")
+        self.btn_save_color.clicked.connect(self.save_adjusted_image)
+        cb_layout.addWidget(self.btn_save_color)
+
+        cb_layout.addStretch(1)
+
+        self.btn_close_color = QPushButton("✕", self.color_bar)
+        self.btn_close_color.setToolTip("Close Color panel (B)")
+        self.btn_close_color.clicked.connect(self.toggle_color_bar)
+        cb_layout.addWidget(self.btn_close_color)
+
+        self.color_bar.hide()
+
+    def toggle_color_bar(self) -> None:
+        """Toggle visibility of the Color Scaling adjustment bar."""
+        if not hasattr(self, "color_bar"):
+            return
+        is_vis = self.color_bar.isVisible()
+        self.color_bar.setVisible(not is_vis)
+        if hasattr(self, "btn_color"):
+            self.btn_color.setChecked(not is_vis)
+        if not is_vis:
+            self.slider_brightness.setFocus()
+
+    def _on_color_slider_changed(self) -> None:
+        b = self.slider_brightness.value()
+        c = self.slider_contrast.value()
+        self.color_brightness = b
+        self.color_contrast = c
+
+        self.lbl_b_val.setText(f"{b:+d}" if b != 0 else "0")
+        self.lbl_c_val.setText(f"{c:+d}" if c != 0 else "0")
+
+        if self.current_is_video:
+            self.video_view.set_color_scaling(b, c)
+        elif self.document is not None:
+            if b == 0 and c == 0:
+                self.canvas.set_image(self.document.current, reset_view=False)
+            else:
+                adj = adjust_qimage_color(self.document.current, b, c)
+                self.canvas.set_image(adj, reset_view=False)
+
+        self._update_ui_state()
+
+    def reset_color_adjustments(self, update_view: bool = True) -> None:
+        """Reset brightness and contrast sliders back to 0."""
+        self.color_brightness = 0
+        self.color_contrast = 0
+        if hasattr(self, "slider_brightness"):
+            self.slider_brightness.blockSignals(True)
+            self.slider_contrast.blockSignals(True)
+            self.slider_brightness.setValue(0)
+            self.slider_contrast.setValue(0)
+            self.slider_brightness.blockSignals(False)
+            self.slider_contrast.blockSignals(False)
+            self.lbl_b_val.setText("0")
+            self.lbl_c_val.setText("0")
+
+        if update_view:
+            if self.current_is_video:
+                self.video_view.set_color_scaling(0, 0)
+            elif self.document is not None:
+                self.canvas.set_image(self.document.current, reset_view=False)
+            self._update_ui_state()
+
+    def save_adjusted_image(self) -> Optional[Path]:
+        """Save color-adjusted image or current video frame as a new image file in the current folder."""
+        cur = self.navigator.current_file
+        if cur is None:
+            return None
+
+        if self.current_is_video:
+            frame = self.video_view.grab_current_frame()
+            if frame is None or frame.isNull():
+                QMessageBox.warning(self, __app_name__, "Could not capture the current video frame.")
+                return None
+            adj = adjust_qimage_color(frame, self.color_brightness, self.color_contrast)
+            pos_sec = max(0, int(self.video_view.player.position() / 1000))
+            target = _next_variant_path(cur, f"frame_{pos_sec}s_color", ".png")
+            try:
+                save_qimage_atomic(adj, target)
+                if self.navigator.current_file:
+                    self.navigator.load_target(self.navigator.current_file)
+                self._update_ui_state()
+                self.status.showMessage(f"💾 Saved video frame as new image: {target.name} (Press → to view)", 8000)
+                return target
+            except Exception as exc:
+                QMessageBox.critical(self, "Save Error", f"Could not save adjusted video frame:\n{exc}")
+                return None
+
+        if self.document is None:
+            return None
+
+        adj = adjust_qimage_color(self.document.current, self.color_brightness, self.color_contrast)
+        ext = cur.suffix if cur.suffix else ".png"
+        target = _next_variant_path(cur, "color", ext)
+        try:
+            save_qimage_atomic(adj, target)
+            if self.navigator.current_file:
+                self.navigator.load_target(self.navigator.current_file)
+            self._update_ui_state()
+            self.status.showMessage(f"💾 Saved as new image: {target.name} (Press → to view)", 8000)
+            return target
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", f"Could not save adjusted image:\n{exc}")
+            return None
+
     def _add_tb_button(
         self,
         text: str,
@@ -507,6 +735,7 @@ class HakuViewWindow(QMainWindow):
         self._add_action("FlipV", "V", self.flip_vertical)
         self._add_action("CropC", "C", self.trigger_crop_action)
         self._add_action("CropIrfan", "Ctrl+Y", self.apply_crop)
+        self._add_action("ColorAdjustB", "B", self.toggle_color_bar)
         self._add_action("CompressK", "K", self.compress_current_variant)
         self._add_action("CompressCtrlK", "Ctrl+K", self.compress_current_variant)
 
@@ -620,6 +849,11 @@ class HakuViewWindow(QMainWindow):
                 event.accept()
                 return
 
+        if key == Qt.Key.Key_B:
+            self.toggle_color_bar()
+            event.accept()
+            return
+
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self.current_is_video and not self.canvas.selection.isNull():
                 self.apply_crop()
@@ -629,7 +863,9 @@ class HakuViewWindow(QMainWindow):
             return
 
         if key == Qt.Key.Key_Escape:
-            if self.current_is_video and self.video_view.has_trim_points():
+            if hasattr(self, "color_bar") and self.color_bar.isVisible():
+                self.toggle_color_bar()
+            elif self.current_is_video and self.video_view.has_trim_points():
                 self.video_view.clear_trim()
                 self.status.showMessage("Trim markers cleared.", 2000)
             elif not self.current_is_video and not self.canvas.selection.isNull():
@@ -751,6 +987,7 @@ class HakuViewWindow(QMainWindow):
         return target
 
     def _display_current_file(self) -> bool:
+        self.reset_color_adjustments(update_view=False)
         current = self.navigator.current_file
         if current is None:
             self.document = None
@@ -889,6 +1126,8 @@ class HakuViewWindow(QMainWindow):
             self.status.showMessage("Undid last change.", 2500)
 
     def save_current(self) -> bool:
+        if self.color_brightness != 0 or self.color_contrast != 0:
+            return bool(self.save_adjusted_image())
         if self.document is None or self.current_is_video:
             return False
         try:
@@ -1081,8 +1320,8 @@ class HakuViewWindow(QMainWindow):
         self.status.showMessage(f"Transcoded to {new_mp4_path.name} and playing full video!", 5000)
 
     def _on_video_trimmed(self, new_clip_path: Path) -> None:
-        if self.navigator.folder and new_clip_path.parent == self.navigator.folder:
-            self.navigator.scan(self.navigator.folder, self.navigator.current_file)
+        if self.navigator.current_file and new_clip_path.parent == (self.navigator.folder or self.navigator.current_file.parent):
+            self.navigator.load_target(self.navigator.current_file)
             self._update_ui_state()
         self.status.showMessage(f"✂ Trimmed video saved: {new_clip_path.name} (Press → to view)", 8000)
 
@@ -1171,7 +1410,7 @@ class HakuViewWindow(QMainWindow):
 
         self.btn_prev.setEnabled(self.navigator.count > 1)
         self.btn_next.setEnabled(self.navigator.count > 1)
-        self.btn_random.setEnabled(self.navigator.count > 1)
+        self.btn_color.setEnabled(has_file)
 
         self.btn_rot_left.setEnabled(is_img)
         self.btn_rot_right.setEnabled(is_img)
@@ -1190,8 +1429,9 @@ class HakuViewWindow(QMainWindow):
         self.btn_info.setEnabled(has_file)
 
         modified = bool(is_img and self.document and self.document.modified)
+        has_color_adj = bool(self.color_brightness != 0 or self.color_contrast != 0)
         self.btn_undo.setEnabled(modified)
-        self.btn_save.setEnabled(modified)
+        self.btn_save.setEnabled(modified or has_color_adj)
 
         if not has_file or cur is None:
             self.setWindowTitle(__app_name__)
@@ -1218,13 +1458,21 @@ class HakuViewWindow(QMainWindow):
             h = self.document.current.height()
             self.lbl_dimensions.setText(f"{w} × {h} px")
             self.lbl_zoom.setText(f"{int(round(self.canvas.zoom_scale * 100))}%")
-            self.lbl_modified.setText("● MODIFIED (Ctrl+S to save)" if modified else "")
+            if has_color_adj:
+                self.lbl_modified.setText("● COLOR ADJ (Ctrl+S to save new)")
+            elif modified:
+                self.lbl_modified.setText("● MODIFIED (Ctrl+S to save)")
+            else:
+                self.lbl_modified.setText("")
             if self._info_visible:
                 self.canvas.set_info_overlay(True, self._build_info_text())
         else:
             self.lbl_dimensions.setText("VIDEO")
             self.lbl_zoom.setText("")
-            self.lbl_modified.setText("")
+            if has_color_adj:
+                self.lbl_modified.setText("● COLOR ADJ (Ctrl+S to save frame)")
+            else:
+                self.lbl_modified.setText("")
 
     def closeEvent(self, event) -> None:
         if not self._confirm_discard_or_save():
@@ -1315,6 +1563,8 @@ class HakuViewWindow(QMainWindow):
         # Image & Video operations
         act_crop = menu.addAction("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action)
         act_crop.setEnabled(is_img or is_vid)
+        act_color = menu.addAction("🎨 Color Scaling / Brightness & Contrast (B)", self.toggle_color_bar)
+        act_color.setEnabled(has_file)
         act_rotl = menu.addAction("↺ Rotate Left 90° (L)", self.rotate_left)
         act_rotl.setEnabled(is_img)
         act_rotr = menu.addAction("↻ Rotate Right 90° (R)", self.rotate_right)
@@ -1398,6 +1648,7 @@ class HakuViewWindow(QMainWindow):
             "<tr><td><b>R / L</b></td><td>Rotate 90° Right / Left</td></tr>"
             "<tr><td><b>H / V</b></td><td>Flip Horizontal / Vertical</td></tr>"
             "<tr><td><b>K</b></td><td>1-Click Compress & save as variant</td></tr>"
+            "<tr><td><b>B</b></td><td>Toggle Color Scaling (Brightness & Contrast) panel</td></tr>"
             "<tr><td><b>Ctrl + Z</b></td><td>Undo last edit</td></tr>"
             "<tr><td><b>Ctrl + S</b></td><td>Save changes (atomic in-place)</td></tr>"
             "<tr><td><b>Ctrl + Shift + S</b></td><td>Save As...</td></tr>"

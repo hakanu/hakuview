@@ -9,7 +9,7 @@ import subprocess
 from typing import Optional
 
 from PySide6.QtCore import QObject, QRect, QThread, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QResizeEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -272,6 +272,49 @@ class TrimSeekSlider(ClickableSlider):
         painter.end()
 
 
+class VideoColorOverlay(QWidget):
+    """Semi-transparent visual overlay for brightness & contrast scaling on video widgets."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.brightness: int = 0
+        self.contrast: int = 0
+
+    def set_color(self, brightness: int, contrast: int) -> None:
+        if self.brightness == brightness and self.contrast == contrast:
+            return
+        self.brightness = brightness
+        self.contrast = contrast
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self.brightness == 0 and self.contrast == 0:
+            return
+        painter = QPainter(self)
+        rect = self.rect()
+
+        # 1. Brightness scaling
+        if self.brightness > 0:
+            alpha = int(min(250, self.brightness * 2.2))
+            painter.fillRect(rect, QColor(255, 255, 255, alpha))
+        elif self.brightness < 0:
+            alpha = int(min(250, -self.brightness * 2.2))
+            painter.fillRect(rect, QColor(0, 0, 0, alpha))
+
+        # 2. Contrast scaling
+        if self.contrast > 0:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Overlay)
+            alpha = int(min(240, self.contrast * 2.0))
+            painter.fillRect(rect, QColor(128, 128, 128, alpha))
+        elif self.contrast < 0:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            alpha = int(min(220, -self.contrast * 1.8))
+            painter.fillRect(rect, QColor(128, 128, 128, alpha))
+
+        painter.end()
+
+
 class ClickableVideoWidget(QVideoWidget):
     """QVideoWidget that emits clicked and doubleClicked signals on mouse events."""
 
@@ -285,6 +328,13 @@ class ClickableVideoWidget(QVideoWidget):
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(220)
         self._click_timer.timeout.connect(self.clicked.emit)
+        self.color_overlay = VideoColorOverlay(self)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "color_overlay"):
+            self.color_overlay.setGeometry(self.rect())
+            self.color_overlay.raise_()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -733,6 +783,55 @@ class VideoPlayerWidget(QWidget):
         if value > 0 and self.audio.isMuted():
             self.audio.setMuted(False)
             self.mute_btn.setText("🔊")
+
+    def set_color_scaling(self, brightness: int, contrast: int) -> None:
+        """Apply color scaling overlay to live video playback."""
+        if hasattr(self.video_widget, "color_overlay"):
+            self.video_widget.color_overlay.set_color(brightness, contrast)
+
+    def grab_current_frame(self) -> Optional[QImage]:
+        """Extract the current video frame as a high-resolution QImage."""
+        try:
+            sink = self.video_widget.videoSink()
+            if sink:
+                frame = sink.videoFrame()
+                if frame.isValid():
+                    img = frame.toImage()
+                    if not img.isNull():
+                        return img
+        except Exception:
+            pass
+
+        cur = getattr(self, "_current_path", None)
+        if not cur or not cur.exists():
+            return None
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        try:
+            pos_sec = max(0.0, self.player.position() / 1000.0)
+            cmd = [
+                ffmpeg,
+                "-ss",
+                str(pos_sec),
+                "-i",
+                str(cur),
+                "-vframes",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "-",
+            ]
+            res = subprocess.run(cmd, capture_output=True, timeout=2.5)
+            if res.returncode == 0 and res.stdout:
+                img = QImage()
+                if img.loadFromData(res.stdout):
+                    return img
+        except Exception:
+            pass
+        return None
 
     def _on_speed_changed(self, index: int) -> None:
         rate = self.speed_combo.itemData(index)
