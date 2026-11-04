@@ -193,3 +193,36 @@ def test_clickable_video_widget(qtbot) -> None:
     widget.doubleClicked.connect(lambda: double_clicks.append(True))
     widget.video_widget.doubleClicked.emit()
     assert len(double_clicks) == 1
+
+
+def test_slideshow_cycles_through_videos(tmp_path: Path, qtbot) -> None:
+    vid_path = tmp_path / "vid1.mp4"
+    vid_path.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    _create_sample_image(tmp_path / "img2.png")
+
+    win = HakuViewWindow(initial_path=vid_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+
+    assert win.current_is_video
+    assert win.navigator.current_file == vid_path
+
+    # Start slideshow while viewing video (F5)
+    win.set_slideshow(True)
+    assert win.slideshow_active
+    assert win.slideshow_timer.isActive()
+
+    # Slideshow tick advances to next file
+    win._on_slideshow_tick()
+    assert win.navigator.current_file == tmp_path / "img2.png"
+    assert not win.current_is_video
+
+    # Advancing back to video keeps slideshow timer running
+    win._on_slideshow_tick()
+    assert win.navigator.current_file == vid_path
+    assert win.current_is_video
+    assert win.slideshow_timer.isActive()
+
+    # Video completion signal also advances immediately
+    win._on_video_finished_in_slideshow()
+    assert win.navigator.current_file == tmp_path / "img2.png"

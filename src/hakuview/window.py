@@ -9,6 +9,7 @@ from typing import Optional
 
 from PySide6.QtCore import QRect, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QDragEnterEvent, QDropEvent, QKeyEvent, QKeySequence
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -527,9 +528,8 @@ class HakuViewWindow(QMainWindow):
             self.document = None
             self.stack.setCurrentWidget(self.video_view)
             self.video_view.load_video(current, slideshow_active=self.slideshow_active)
-            # Pause timer while video plays in slideshow; videoFinished advances slideshow
             if self.slideshow_active:
-                self.slideshow_timer.stop()
+                self._start_slideshow_timer()
             self._update_ui_state()
             self.cache.preload_neighbors(self.navigator.neighbors(radius=2))
             return True
@@ -553,7 +553,7 @@ class HakuViewWindow(QMainWindow):
             self.canvas.set_info_overlay(True, self._build_info_text())
 
         if self.slideshow_active:
-            self.slideshow_timer.start(int(self.slideshow_interval_sec * 1000))
+            self._start_slideshow_timer()
 
         self._update_ui_state()
         self.cache.preload_neighbors(self.navigator.neighbors(radius=2))
@@ -785,8 +785,7 @@ class HakuViewWindow(QMainWindow):
 
         if active:
             self.btn_slideshow.setText("⏹ Stop (W)")
-            if not self.current_is_video:
-                self.slideshow_timer.start(int(self.slideshow_interval_sec * 1000))
+            self._start_slideshow_timer()
             self.status.showMessage(
                 f"Slideshow started ({self.slideshow_interval_sec:.1f}s interval, "
                 f"{'shuffle' if self.slideshow_random else 'sequential'})",
@@ -797,10 +796,28 @@ class HakuViewWindow(QMainWindow):
             self.slideshow_timer.stop()
             self.status.showMessage("Slideshow stopped", 2000)
 
+    def _start_slideshow_timer(self) -> None:
+        if not self.slideshow_active:
+            return
+        interval_ms = int(self.slideshow_interval_sec * 1000)
+        if self.current_is_video:
+            if self.video_view.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                self.video_view.player.play()
+            dur = self.video_view.player.duration()
+            pos = self.video_view.player.position()
+            remaining_ms = (dur - pos) if (dur > 0 and dur > pos) else 0
+            if 0 < remaining_ms <= 30000:
+                wait_ms = max(interval_ms, remaining_ms + 250)
+            else:
+                wait_ms = interval_ms
+            self.slideshow_timer.start(wait_ms)
+        else:
+            self.slideshow_timer.start(interval_ms)
+
     def _on_interval_changed(self, value: float) -> None:
         self.slideshow_interval_sec = max(0.5, value)
-        if self.slideshow_active and not self.current_is_video:
-            self.slideshow_timer.start(int(self.slideshow_interval_sec * 1000))
+        if self.slideshow_active:
+            self._start_slideshow_timer()
 
     def _on_shuffle_toggled(self, checked: bool) -> None:
         self.slideshow_random = checked
@@ -812,6 +829,7 @@ class HakuViewWindow(QMainWindow):
 
     def _on_video_finished_in_slideshow(self) -> None:
         if self.slideshow_active:
+            self.slideshow_timer.stop()
             self.next_item()
 
     def _on_video_transcoded(self, new_mp4_path: Path) -> None:

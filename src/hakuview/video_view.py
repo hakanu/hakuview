@@ -280,6 +280,7 @@ class VideoPlayerWidget(QWidget):
         self.player.durationChanged.connect(self._on_duration_changed)
         self.player.playbackStateChanged.connect(self._on_state_changed)
         self.player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self.player.errorOccurred.connect(self._on_player_error)
 
     def load_video(self, path: Path, slideshow_active: bool = False) -> None:
         self._current_path = path
@@ -340,6 +341,8 @@ class VideoPlayerWidget(QWidget):
 
     def set_slideshow_mode(self, active: bool) -> None:
         self._in_slideshow = active
+        if active and self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self.player.play()
 
     def toggle_play_pause(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -399,9 +402,13 @@ class VideoPlayerWidget(QWidget):
             self.play_btn.setText("▶ Play")
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+        if status in (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia):
             if self._in_slideshow:
                 self.videoFinished.emit()
             elif self._loop_when_not_slideshow:
                 self.player.setPosition(0)
                 self.player.play()
+
+    def _on_player_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
+        if self._in_slideshow:
+            self.videoFinished.emit()
