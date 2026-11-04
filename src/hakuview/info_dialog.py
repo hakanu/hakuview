@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from . import __app_name__
 from .folder_scanner import is_video_file
 from .formatting import human_size
+from . import theme
 from .installer import ensure_hakuview_ico
 
 
@@ -270,6 +271,10 @@ class MediaInfoDialog(QDialog):
 
         self._info = extract_media_info(path)
         self._build_ui()
+        # The card's styles are written in dark colors; in the light theme convert them all.
+        for widget in [self, *self.findChildren(QWidget)]:
+            if widget.styleSheet():
+                widget.setStyleSheet(theme.adapt(widget.styleSheet()))
 
     def _build_ui(self) -> None:
         self.setStyleSheet(
@@ -441,7 +446,7 @@ class MediaInfoDialog(QDialog):
             gen_data.append(("Overall Bitrate", self._info.get("overall_bitrate_str", "N/A")))
 
         tg_layout.addWidget(self._make_property_table(gen_data))
-        tabs.addTab(tab_general, "General & Metrics")
+        tabs.addTab(tab_general, "General && Metrics")
 
         # Tab 2: Streams / Visual Details
         tab_visual = QWidget()

@@ -153,7 +153,7 @@ def test_window_cycle_rotate_crop_and_slideshow(tmp_path: Path, qtbot) -> None:
     assert variant1 in win.navigator.files
 
     # Switch preset to Lossless WebP and compress again -> img_1_lossless.webp
-    win.combo_compress.setCurrentIndex(1)  # Lossless WebP
+    win.set_compression_mode("lossless_webp")
     variant2 = win.compress_current_variant()
     assert variant2 is not None
     assert variant2.exists()
@@ -305,8 +305,13 @@ def test_combobox_popup_dark_theme(tmp_path: Path, qtbot) -> None:
     qtbot.addWidget(win)
     win.show()
 
-    # The compression combo box popup view must have a dark background palette, not white
-    view = win.combo_compress.view()
+    # Combo box popups (e.g. in Settings) must follow the dark theme, not the white system default
+    from hakuview.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(win.app_settings, win.update_settings, win)
+    qtbot.addWidget(dlg)
+    dlg.show()
+    view = dlg.combo_sort.view()
     bg_color = view.palette().base().color()
     # Lightness is 0-255; dark background should be < 100, not 255 (white)
     assert bg_color.lightness() < 100
@@ -1007,3 +1012,137 @@ def test_windows_never_check_for_updates_unless_asked(qtbot, monkeypatch) -> Non
     qtbot.addWidget(win)
     qtbot.wait(100)
     assert calls == [] and not win.update_checker.running
+
+
+def test_light_and_dark_themes_switch_palette_and_stylesheet(tmp_path: Path, qtbot) -> None:
+    from hakuview import theme
+
+    win = HakuViewWindow()
+    qtbot.addWidget(win)
+    assert theme.is_dark()  # default keeps HakuView's classic dark look
+    dark_qss = win.styleSheet()
+
+    win.app_settings.theme = "light"
+    win.apply_settings()
+    assert not theme.is_dark()
+    assert win.styleSheet() != dark_qss and theme.LIGHT["panel"] in win.styleSheet()
+    assert QColor(theme.PALETTE["canvas"]).lightness() > 200
+
+    # Dark-only stylesheets (Media Inspector) are auto-converted: dark bg -> light, light text -> dark.
+    assert QColor(theme.adapt("#171b23")).lightness() > 200
+    assert QColor(theme.adapt("#f1f5f9")).lightness() < 60
+    win.app_settings.theme = "dark"
+    win.apply_settings()
+    assert theme.adapt("#171b23") == "#171b23"
+
+
+def test_settings_dialog_saves_and_applies_preferences(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+    from hakuview.settings import AppSettings
+    from hakuview.settings_dialog import SettingsDialog
+
+    for name, size in (("a.png", 50), ("b.png", 400), ("c.png", 120)):
+        _create_sample_image(tmp_path / name, width=size, height=size)
+    win = HakuViewWindow(initial_path=tmp_path / "a.png")
+    qtbot.addWidget(win)
+
+    def fill_and_accept(dlg):
+        dlg.combo_sort.setCurrentIndex(dlg.combo_sort.findData("size"))
+        dlg.combo_wheel.setCurrentIndex(dlg.combo_wheel.findData("navigate"))
+        dlg.combo_compress.setCurrentIndex(dlg.combo_compress.findData("webp_q80"))
+        dlg.spin_interval.setValue(7.5)
+        dlg.chk_loop.setChecked(False)
+        dlg.chk_updates.setChecked(False)
+        dlg.accept()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(SettingsDialog, "exec", fill_and_accept)
+    win.show_settings_dialog()
+
+    assert [p.name for p in win.navigator.files] == ["b.png", "c.png", "a.png"]  # largest first
+    assert win.navigator.current_file.name == "a.png"  # selection kept
+    assert win.canvas.wheel_navigates
+    assert win.compress_mode == "webp_q80"
+    assert win.spin_interval.value() == 7.5
+    assert not win.video_view.loop
+    assert not win.update_settings.check_on_startup
+
+    fresh = AppSettings()  # persisted
+    assert (fresh.sort_mode, fresh.wheel_action, fresh.compression_mode) == ("size", "navigate", "webp_q80")
+
+
+def test_session_restores_geometry_last_folder_and_volume(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+
+    _create_sample_image(tmp_path / "a.png")
+    win = HakuViewWindow(initial_path=tmp_path / "a.png")
+    qtbot.addWidget(win)
+    win.show()
+    win.resize(700, 480)  # must fit the 800x600 offscreen test screen, or Qt clamps it
+    saved_size = win.size().toTuple()
+    win.video_view.set_volume(35)
+    win.close()
+
+    again = HakuViewWindow()
+    qtbot.addWidget(again)
+    assert again.size().toTuple() == saved_size
+    assert again.video_view.volume == 35
+    seen = []
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda parent, title, start, filt: seen.append(start) or ("", ""))
+    again.open_file_dialog()
+    assert seen == [str(tmp_path)]
+
+    # Explicit CLI --interval beats the saved slideshow interval.
+    assert HakuViewWindow(slideshow_interval=9.0).slideshow_interval_sec == 9.0
+
+
+def test_unreadable_image_explains_why_on_the_canvas(tmp_path: Path, qtbot) -> None:
+    from hakuview.image_ops import describe_load_failure
+
+    broken = tmp_path / "broken.jpg"
+    broken.write_bytes(b"this is not a jpeg")
+    (tmp_path / "empty.png").write_bytes(b"")
+    assert "valid image" in describe_load_failure(broken)
+    assert "empty" in describe_load_failure(tmp_path / "empty.png")
+
+    win = HakuViewWindow(initial_path=broken)
+    qtbot.addWidget(win)
+    assert win.canvas._message is not None and "broken.jpg" in win.canvas._message
+    assert win.lbl_dimensions.text() == ""  # not mislabelled as VIDEO
+    win.next_item()  # moving on to a good file clears the message
+    assert win.canvas._message is None or "empty.png" in win.canvas._message
+
+
+def test_mouse_wheel_can_navigate_files(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    for i in range(3):
+        _create_sample_image(tmp_path / f"img{i}.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img0.png")
+    qtbot.addWidget(win)
+
+    def wheel(delta_y: int, mods=Qt.KeyboardModifier.NoModifier) -> None:
+        ev = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, delta_y),
+                         Qt.MouseButton.NoButton, mods, Qt.ScrollPhase.NoScrollPhase, False)
+        win.canvas.wheelEvent(ev)
+
+    zoom = win.canvas.zoom_scale
+    wheel(-120)
+    assert win.navigator.index == 0 and win.canvas.zoom_scale != zoom  # default: wheel zooms
+
+    win.canvas.wheel_navigates = True
+    wheel(-120)
+    assert win.navigator.current_file.name == "img1.png"
+    wheel(60)
+    wheel(60)  # two half-notches (touchpad) = one step back
+    assert win.navigator.current_file.name == "img0.png"
+    zoom = win.canvas.zoom_scale
+    wheel(120, Qt.KeyboardModifier.ControlModifier)  # Ctrl+wheel still zooms
+    assert win.canvas.zoom_scale != zoom and win.navigator.current_file.name == "img0.png"
+
+
+def test_toolbar_fits_default_window_width(qtbot) -> None:
+    win = HakuViewWindow()
+    qtbot.addWidget(win)
+    assert win.toolbar.sizeHint().width() < 1180 - 60

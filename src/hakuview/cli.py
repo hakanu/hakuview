@@ -54,8 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         "--interval",
         type=float,
-        default=3.0,
-        help="Slideshow interval in seconds (default: 3.0).",
+        default=None,
+        help="Slideshow interval in seconds (default: the one saved in Settings, initially 3.0).",
     )
     parser.add_argument(
         "-f",

@@ -50,9 +50,11 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 - ✂️ **Lossless Video Trimming (`[` / `]` or `I` / `O` + `T`)**  
   Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, then press `T` or click **✂ Trim**. Uses instant FFmpeg stream copy with zero re-encoding and zero quality loss.
 - 🎨 **Color Scaling: Brightness & Contrast (`B`)**  
-  Toggles real-time brightness and contrast sliders for both images and videos. Saving always saves as a new image without altering or overwriting original media.
+  Real-time brightness and contrast for images and videos. Save the result as a new image, a single video frame, or a whole new video (`<name>_color.mp4`) — originals are never overwritten.
 - ℹ️ **Geeky Media Inspector (`I` / `Ctrl+I`)**  
   Opens a detailed technical card showing true compression ratios, video/audio bitrates, bits-per-pixel (BPP) efficiency, container profiles, and camera EXIF data with 1-click clipboard export.
+- ⚙️ **Settings & Themes (`Ctrl+,`)**  
+  Dark, Light or Follow-system theme, mouse wheel = zoom or next/previous file, sort by name / date / size, default compression preset and slideshow interval. Window size, position, last folder and volume are remembered.
 
 ---
 
@@ -83,7 +85,7 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 
 ## 📦 Supported Formats
 
-- **Images**: JPEG, PNG, WebP (static & animated), GIF, BMP, TIFF, SVG, ICO, AVIF, HEIC
+- **Images**: JPEG, PNG, WebP (static & animated), GIF, BMP, TIFF, SVG, ICO, AVIF, HEIC (HEIC needs the optional `pillow-heif`: `uv tool install --force --with pillow-heif git+https://github.com/hakanu/hakuview.git`)
 - **Videos**: MP4, MKV, WebM, AVI, MOV, M4V, WMV, FLV, MPG, TS
 
 ---

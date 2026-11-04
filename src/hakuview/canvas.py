@@ -22,6 +22,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from .theme import PALETTE
+
 
 class ImageCanvas(QWidget):
     """Hardware-accelerated QPainter canvas supporting IrfanView-style selection crop, zoom & pan."""
@@ -29,6 +31,7 @@ class ImageCanvas(QWidget):
     zoomChanged = Signal(float)
     selectionChanged = Signal(QRect)  # Emitted in image pixel coordinates
     doubleClicked = Signal()
+    wheelNavigate = Signal(int)  # +1 = next file, -1 = previous (when the wheel is set to navigate)
 
     HANDLE_RADIUS = 6
 
@@ -54,6 +57,10 @@ class ImageCanvas(QWidget):
         self._show_info_overlay: bool = False
         self._info_text: str = ""
         self._checker_brush: Optional[QBrush] = None
+        self._checker_colors: tuple = ()
+        self._message: Optional[str] = None  # shown instead of the hint when a file failed to load
+        self.wheel_navigates: bool = False
+        self._wheel_accum: int = 0
 
     # ------------------------------------------------------------------
     # Image & Movie management
@@ -236,8 +243,7 @@ class ImageCanvas(QWidget):
             self._scale < 2.0,  # Smooth downscaling; crisp pixel grid when zoomed > 200%
         )
 
-        # Dark neutral backdrop (IrfanView fullscreen/dark style)
-        painter.fillRect(self.rect(), QColor(20, 22, 26))
+        painter.fillRect(self.rect(), QColor(PALETTE["canvas"]))
 
         if self._image is None or self._image.isNull() or self._pixmap is None:
             self._draw_empty_placeholder(painter)
@@ -259,17 +265,23 @@ class ImageCanvas(QWidget):
         if self._show_info_overlay and self._info_text:
             self._draw_info_hud(painter)
 
+    def set_message(self, message: Optional[str]) -> None:
+        """Text to show when there is no image (e.g. why a file failed to load); None = default hint."""
+        self._message = message
+        self.update()
+
     def _draw_empty_placeholder(self, painter: QPainter) -> None:
-        painter.setPen(QColor(145, 152, 165))
+        painter.setPen(QColor(PALETTE["canvas_hint"]))
         font = QFont(self.font())
         font.setPointSize(12)
         painter.setFont(font)
-        msg = (
+        msg = self._message or (
             "Drop an image or video here, or press O to Open\n\n"
             "← / → : Cycle folder   |   R / L : Rotate   |   Drag + C : Crop\n"
             "W / F5 : Slideshow   |   Ctrl+M : Random File   |   F / F11 : Fullscreen"
         )
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, msg)
+        flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
+        painter.drawText(self.rect().adjusted(40, 0, -40, 0), flags, msg)
 
     def _draw_checkerboard(self, painter: QPainter, rect: QRectF) -> None:
         # Only paint the visible part of the image; at high zoom `rect` can be
@@ -277,15 +289,17 @@ class ImageCanvas(QWidget):
         visible = rect.intersected(QRectF(self.rect()))
         if visible.isEmpty():
             return
-        if self._checker_brush is None:
+        colors = (PALETTE["checker_a"], PALETTE["checker_b"])
+        if self._checker_brush is None or self._checker_colors != colors:  # rebuilt on theme change
             tile = 12
             pattern = QPixmap(tile * 2, tile * 2)
-            pattern.fill(QColor(42, 44, 48))
+            pattern.fill(QColor(colors[0]))
             p = QPainter(pattern)
-            p.fillRect(tile, 0, tile, tile, QColor(58, 60, 66))
-            p.fillRect(0, tile, tile, tile, QColor(58, 60, 66))
+            p.fillRect(tile, 0, tile, tile, QColor(colors[1]))
+            p.fillRect(0, tile, tile, tile, QColor(colors[1]))
             p.end()
             self._checker_brush = QBrush(pattern)
+            self._checker_colors = colors
         painter.save()
         painter.setBrushOrigin(rect.topLeft())
         painter.fillRect(visible, self._checker_brush)
@@ -554,6 +568,15 @@ class ImageCanvas(QWidget):
     def wheelEvent(self, event: QWheelEvent) -> None:
         delta = event.angleDelta().y()
         if delta == 0:
+            return
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if self.wheel_navigates and not ctrl:
+            # Ctrl+wheel still zooms; touchpads send many small deltas, so only act on a full notch.
+            self._wheel_accum += delta
+            if abs(self._wheel_accum) >= 120:
+                self.wheelNavigate.emit(-1 if self._wheel_accum > 0 else 1)
+                self._wheel_accum = 0
+            event.accept()
             return
         if delta > 0:
             self.zoom_in(1.18, event.position())

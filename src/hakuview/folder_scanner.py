@@ -30,6 +30,30 @@ def natural_sort_key(path: Path) -> List[object]:
     return [int(part) if part.isdigit() else part for part in parts]
 
 
+SORT_MODES = {
+    "name": "Name",
+    "date": "Date modified (newest first)",
+    "size": "File size (largest first)",
+}
+
+
+def _stat_or_zero(path: Path, attr: str) -> float:
+    try:
+        return getattr(path.stat(), attr)
+    except OSError:
+        return 0
+
+
+def sort_files(files: List[Path], mode: str = "name") -> List[Path]:
+    """Sort in place and return `files`; ties fall back to natural name order."""
+    files.sort(key=natural_sort_key)
+    if mode == "date":
+        files.sort(key=lambda p: _stat_or_zero(p, "st_mtime"), reverse=True)
+    elif mode == "size":
+        files.sort(key=lambda p: _stat_or_zero(p, "st_size"), reverse=True)
+    return files
+
+
 def is_image_file(path: Path | str) -> bool:
     return Path(path).suffix.lower() in IMAGE_EXTENSIONS
 
@@ -45,7 +69,8 @@ def is_supported_media(path: Path | str) -> bool:
 class FolderNavigator:
     """Manages the list of media files in a folder and current cursor position."""
 
-    def __init__(self) -> None:
+    def __init__(self, sort_mode: str = "name") -> None:
+        self.sort_mode = sort_mode
         self.folder: Optional[Path] = None
         self.files: List[Path] = []
         self.index: int = -1
@@ -82,7 +107,7 @@ class FolderNavigator:
             return None
 
         self.folder = folder
-        self.files = self._scan_folder(folder)
+        self.files = sort_files(self._scan_folder(folder), self.sort_mode)
 
         if not self.files:
             # If the user explicitly opened a single file whose extension wasn't in our list,
@@ -112,7 +137,7 @@ class FolderNavigator:
                     self.index = matched_idx
                 else:
                     self.files.append(selected_file)
-                    self.files.sort(key=natural_sort_key)
+                    sort_files(self.files, self.sort_mode)
                     self.index = self.files.index(selected_file)
         else:
             self.index = 0
@@ -138,8 +163,15 @@ class FolderNavigator:
         except OSError:
             return []
 
-        results.sort(key=natural_sort_key)
         return results
+
+    def set_sort_mode(self, mode: str) -> None:
+        """Re-sort the loaded folder, keeping the same file selected."""
+        self.sort_mode = mode
+        current = self.current_file
+        sort_files(self.files, mode)
+        if current is not None:
+            self.index = self.files.index(current)
 
     def next(self, wrap: bool = True) -> Optional[Path]:
         """Advance to the next file in the folder."""

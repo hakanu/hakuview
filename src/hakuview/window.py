@@ -9,6 +9,7 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
+    QGuiApplication,
     QAction,
     QActionGroup,
     QDesktopServices,
@@ -22,7 +23,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
@@ -38,12 +39,13 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from . import __app_name__, __version__, dialogs, display_version
 from .canvas import ImageCanvas
 from .color_bar import ColorAdjustBar
-from .folder_scanner import SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
+from .folder_scanner import SORT_MODES, SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
 from .formatting import human_size
 from .image_ops import (
     COMPRESSION_MODES,
@@ -51,6 +53,7 @@ from .image_ops import (
     ImageDocument,
     ImagePreloadCache,
     adjust_qimage_color,
+    describe_load_failure,
     compress_image_as_variant,
     is_animated_image,
     _next_variant_path,
@@ -58,7 +61,9 @@ from .image_ops import (
 )
 from .info_dialog import MediaInfoDialog
 from .installer import ensure_hakuview_ico
-from .theme import APP_QSS
+from .settings import AppSettings
+from .settings_dialog import SettingsDialog
+from . import theme
 from .updater import RELEASES_URL, UpdateChecker, UpdateRunner, UpdateSettings, can_self_update, is_newer
 from .video_view import VideoPlayerWidget, _format_ms
 from .widgets import FullscreenControls, chevron_icon, menu_position_under, three_dots_icon
@@ -72,52 +77,119 @@ class HakuViewWindow(QMainWindow):
         initial_path: Optional[Path | str] = None,
         pick_random: bool = False,
         start_slideshow: bool = False,
-        slideshow_interval: float = 3.0,
+        slideshow_interval: Optional[float] = None,
         start_fullscreen: bool = False,
         check_updates: bool = False,
     ) -> None:
         super().__init__()
 
-        self.navigator = FolderNavigator()
+        self.app_settings = AppSettings()
+        self.update_settings = UpdateSettings()
+        self.navigator = FolderNavigator(sort_mode=self.app_settings.sort_mode)
         self.cache = ImagePreloadCache(max_items=10)
         self.document: Optional[ImageDocument] = None
         self.current_is_video: bool = False
         self._info_visible: bool = False
         self._prompt_unsaved: bool = True
 
-        # Slideshow state
+        # Slideshow state (an explicit --interval wins over the saved preference)
         self.slideshow_active: bool = False
         self.slideshow_random: bool = False
-        self.slideshow_interval_sec: float = max(0.5, float(slideshow_interval))
+        interval = slideshow_interval if slideshow_interval is not None else self.app_settings.slideshow_interval
+        self.slideshow_interval_sec: float = max(0.5, float(interval))
         self.slideshow_timer = QTimer(self)
         self.slideshow_timer.timeout.connect(self._on_slideshow_tick)
 
-        self.setStyleSheet(APP_QSS)
+        theme.set_theme(self.app_settings.theme)
         self._build_ui()
         self._build_shortcuts()
+        self.apply_settings()
+        self.video_view.set_volume(self.app_settings.video_volume)
+        self.video_view.set_muted(self.app_settings.video_muted)
+        # Follow the desktop's light/dark switch live when the theme is "system".
+        QGuiApplication.styleHints().colorSchemeChanged.connect(self._on_system_color_scheme_changed)
 
         self.setWindowTitle(__app_name__)
         self.setWindowIcon(QIcon(str(ensure_hakuview_ico())))
         self.resize(1180, 780)
+        geometry = self.app_settings.window_geometry if self.app_settings.remember_session else None
+        if geometry is not None:
+            self.restoreGeometry(geometry)
         self.setAcceptDrops(True)
+
+        self.update_checker = UpdateChecker(self)
+        self.update_checker.finished.connect(self._on_update_check_finished)
+        self._update_check_manual = False
+        self._update_runner: Optional[UpdateRunner] = None
 
         if initial_path is not None:
             self.open_path(Path(initial_path), pick_random=pick_random)
 
-        if start_fullscreen:
+        if start_fullscreen and not self.isFullScreen():
             self.toggle_fullscreen()
 
         if start_slideshow and self.navigator.count > 0:
             self.set_slideshow(True)
 
-        self.update_settings = UpdateSettings()
-        self.update_checker = UpdateChecker(self)
-        self.update_checker.finished.connect(self._on_update_check_finished)
-        self._update_check_manual = False
-        self._update_runner: Optional[UpdateRunner] = None
         if check_updates and self.update_settings.startup_check_due():
             # Let the first image paint before touching the network.
             QTimer.singleShot(2500, self, lambda: self.check_for_updates(manual=False))
+
+    # ------------------------------------------------------------------
+    # Settings & theme
+    # ------------------------------------------------------------------
+
+    def apply_settings(self) -> None:
+        """Push AppSettings into the UI (startup and after the Settings dialog)."""
+        s = self.app_settings
+        self.apply_theme()
+        self.canvas.wheel_navigates = s.wheel_action == "navigate"
+        if self.navigator.sort_mode != s.sort_mode:
+            self.navigator.set_sort_mode(s.sort_mode)
+            self._update_ui_state()
+        self.set_compression_mode(s.compression_mode)
+        self.spin_interval.setValue(self.slideshow_interval_sec)
+        self.chk_shuffle.setChecked(s.slideshow_shuffle)
+        self.video_view.loop = s.video_loop
+
+    def apply_theme(self) -> None:
+        theme.set_theme(self.app_settings.theme)
+        self.setStyleSheet(theme.app_qss())
+        # Hand-drawn icons and the canvas read the palette when created / painted.
+        self.btn_more.setIcon(three_dots_icon(size=22))
+        self.fs_overlay.btn_more.setIcon(three_dots_icon(size=20))
+        if self._overflow_button is not None:
+            self._overflow_button.setIcon(chevron_icon())
+        self.canvas.update()
+
+    def _on_system_color_scheme_changed(self, _scheme) -> None:
+        if self.app_settings.theme == "system":
+            self.apply_theme()
+
+    def show_settings_dialog(self) -> None:
+        dlg = SettingsDialog(self.app_settings, self.update_settings, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.slideshow_interval_sec = self.app_settings.slideshow_interval
+            self.apply_settings()
+            self.status.showMessage("Settings saved.", 2500)
+
+    def set_sort_mode(self, mode: str) -> None:
+        self.app_settings.sort_mode = mode
+        self.navigator.set_sort_mode(mode)
+        self._update_ui_state()
+        self.status.showMessage(f"Sorted by {SORT_MODES[mode].lower()}.", 2500)
+
+    def _save_session(self) -> None:
+        s = self.app_settings
+        s.video_volume = self.video_view.volume
+        s.video_muted = self.video_view.audio.isMuted()
+        s.slideshow_interval = self.slideshow_interval_sec
+        s.slideshow_shuffle = self.slideshow_random
+        if s.remember_session:
+            s.window_geometry = self.saveGeometry()
+            if self.navigator.folder is not None:
+                s.last_folder = str(self.navigator.folder)
+        s.sync()
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -155,6 +227,8 @@ class HakuViewWindow(QMainWindow):
         self.video_view.colorExportCompleted.connect(self._on_color_export_done)
         self.video_view.colorExportFailed.connect(self._on_color_export_failed)
         self.video_view.infoRequested.connect(self.show_media_info_dialog)
+        self.video_view.playbackFailed.connect(lambda msg: self.status.showMessage(f"⚠ {msg}", 8000))
+        self.canvas.wheelNavigate.connect(lambda step: self.next_item() if step > 0 else self.prev_item())
 
         # Compact Top Toolbar
         # Top bar = main toolbar (stretches; extra buttons go to its » overflow popup when the
@@ -170,15 +244,18 @@ class HakuViewWindow(QMainWindow):
         top_layout.addWidget(self.toolbar, stretch=1)
         self.setMenuWidget(self.top_bar)
 
-        self.btn_open = self._add_tb_button("📂 Open", self.open_file_dialog, "Open an image or video file", "O")
+        self.btn_open = self._add_tb_button("Open", self.open_file_dialog, "Open an image or video file", "O")
         self.btn_prev = self._add_tb_button("◀ Prev", self.prev_item, "Previous file in folder", "←")
         self.btn_next = self._add_tb_button("Next ▶", self.next_item, "Next file in folder", "→")
-
         self.toolbar.addSeparator()
 
-        self.btn_rot_left = self._add_tb_button("↺", self.rotate_left, "Rotate 90° counter-clockwise", "L")
-        self.btn_rot_right = self._add_tb_button("↻", self.rotate_right, "Rotate 90° clockwise", "R")
-        self.btn_flip_h = self._add_tb_button("⇆", self.flip_horizontal, "Flip horizontally", "H")
+        # Edit ▾ : rotate / flip live in one dropdown to keep the toolbar short.
+        self.edit_menu = QMenu(self)
+        self.edit_menu.addAction("↺  Rotate Left 90°   (L)", self.rotate_left)
+        self.edit_menu.addAction("↻  Rotate Right 90°   (R)", self.rotate_right)
+        self.edit_menu.addAction("⇆  Flip Horizontal   (H)", self.flip_horizontal)
+        self.edit_menu.addAction("⇅  Flip Vertical   (V)", self.flip_vertical)
+        self.btn_edit = self._add_tb_dropdown("Edit", "Rotate and flip the image", self.edit_menu, "editMenuButton")
         self.btn_crop = self._add_tb_button(
             "✂ Crop",
             self.trigger_crop_action,
@@ -187,45 +264,36 @@ class HakuViewWindow(QMainWindow):
         )
         self.btn_crop.setEnabled(False)
         self.btn_color = self._add_tb_button(
-            "🎨 Color",
-            self.toggle_color_bar,
-            "Adjust brightness & contrast for images and videos",
-            "B",
-            checkable=True,
+            "Color", self.toggle_color_bar, "Adjust brightness & contrast for images and videos", "B", checkable=True
         )
-        self.btn_undo = self._add_tb_button("↶ Undo", self.undo_edit, "Undo last image edit", "Ctrl+Z")
+        self.btn_undo = self._add_tb_button("Undo", self.undo_edit, "Undo last image edit", "Ctrl+Z")
         self.btn_undo.setEnabled(False)
-        self.btn_save = self._add_tb_button("💾 Save", self.save_current, "Save changes (Ctrl+Shift+S for Save As)", "Ctrl+S")
+        self.btn_save = self._add_tb_button("Save", self.save_current, "Save changes (Ctrl+Shift+S for Save As)", "Ctrl+S")
         self.btn_save.setEnabled(False)
 
-        self.btn_compress = self._add_tb_button(
-            "🗜 Compress",
-            self.compress_current_variant,
-            "Compress & save as a variant file in the same folder",
-            "K",
+        # Compress ▾ : click = compress with the current preset; arrow = choose the preset.
+        self.compress_mode: str = COMPRESSION_MODES[0][1]
+        self.compress_menu = QMenu(self)
+        self._compress_group = QActionGroup(self.compress_menu)
+        self._compress_actions = {}
+        for label, mode_id in COMPRESSION_MODES:
+            act = self.compress_menu.addAction(label, lambda m=mode_id: self.set_compression_mode(m))
+            act.setCheckable(True)
+            self._compress_group.addAction(act)
+            self._compress_actions[mode_id] = act
+        self.btn_compress = self._add_tb_dropdown(
+            "Compress", "", self.compress_menu, "compressButton", slot=self.compress_current_variant
         )
         self.btn_compress.setEnabled(False)
-
-        self.combo_compress = QComboBox(self)
-        self.combo_compress.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.combo_compress.setToolTip("Select compression method for 1-click variant save")
-        for label, mode_id in COMPRESSION_MODES:
-            self.combo_compress.addItem(label, mode_id)
-        self.toolbar.addWidget(self.combo_compress)
-
         self.toolbar.addSeparator()
 
-        self.btn_slideshow = self._add_tb_button(
-            "▶ Slideshow",
-            self.toggle_slideshow,
-            "Start/stop automatic slideshow",
-            "W / F5",
-            checkable=True,
-        )
-
-        self.toolbar.addWidget(QLabel(" Interval:"))
-
-        self.spin_interval = QDoubleSpinBox(self)
+        # Slideshow ▾ : click = start/stop; arrow = interval & shuffle.
+        self.slideshow_menu = QMenu(self)
+        options = QWidget(self.slideshow_menu)
+        options_layout = QHBoxLayout(options)
+        options_layout.setContentsMargins(12, 6, 12, 6)
+        options_layout.addWidget(QLabel("Interval", options))
+        self.spin_interval = QDoubleSpinBox(options)
         self.spin_interval.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.spin_interval.setRange(0.5, 120.0)
         self.spin_interval.setSingleStep(0.5)
@@ -233,23 +301,25 @@ class HakuViewWindow(QMainWindow):
         self.spin_interval.setSuffix(" s")
         self.spin_interval.setValue(self.slideshow_interval_sec)
         self.spin_interval.valueChanged.connect(self._on_interval_changed)
-        self.toolbar.addWidget(self.spin_interval)
-
-        self.chk_shuffle = QCheckBox("Shuffle", self)
+        options_layout.addWidget(self.spin_interval)
+        self.chk_shuffle = QCheckBox("Shuffle", options)
         self.chk_shuffle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.chk_shuffle.toggled.connect(self._on_shuffle_toggled)
-        self.toolbar.addWidget(self.chk_shuffle)
-
+        options_layout.addWidget(self.chk_shuffle)
+        options_action = QWidgetAction(self.slideshow_menu)
+        options_action.setDefaultWidget(options)
+        self.slideshow_menu.addAction(options_action)
+        self.btn_slideshow = self._add_tb_dropdown(
+            "▶ Slideshow", "Start/stop the slideshow  (W / F5) — arrow: interval & shuffle",
+            self.slideshow_menu, "slideshowButton", slot=self.toggle_slideshow, checkable=True,
+        )
         self.toolbar.addSeparator()
 
-        self.btn_fit = self._add_tb_button("⊞ Fit", self.canvas.zoom_fit, "Fit image to window", "0")
+        self.btn_fit = self._add_tb_button("Fit", self.canvas.zoom_fit, "Fit image to window", "0")
         self.btn_actual = self._add_tb_button("1:1", self.canvas.zoom_actual, "Actual pixel size (100%)", "1")
         self.btn_fullscreen = self._add_tb_button("⛶", self.toggle_fullscreen, "Toggle fullscreen", "F / F11")
         self.btn_info = self._add_tb_button(
-            "ℹ Info",
-            self.show_media_info_dialog,
-            "Media Inspector: compression ratio, bitrate, codec, EXIF & tech specs",
-            "I / Ctrl+I",
+            "Info", self.show_media_info_dialog, "Media Inspector: compression ratio, bitrate, codec, EXIF & tech specs", "I / Ctrl+I"
         )
         self.btn_info.setEnabled(False)
 
@@ -263,10 +333,10 @@ class HakuViewWindow(QMainWindow):
         self.btn_more.clicked.connect(lambda: self.show_more_options_menu(self.btn_more))
         top_layout.addWidget(self.btn_more)
 
-        overflow = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
-        if overflow is not None:
-            overflow.setIcon(chevron_icon())
-            overflow.setToolTip("More toolbar buttons")
+        self._overflow_button = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+        if self._overflow_button is not None:
+            self._overflow_button.setIcon(chevron_icon())
+            self._overflow_button.setToolTip("More toolbar buttons")
 
         # Floating top-right controls for fullscreen mode
         self.fs_overlay = FullscreenControls(self)
@@ -340,6 +410,34 @@ class HakuViewWindow(QMainWindow):
         self.status.showMessage(f"💾 Saved {what} as new image: {target.name} (Press → to view)", 8000)
         return target
 
+    def _add_tb_dropdown(
+        self, text: str, tooltip: str, menu: QMenu, object_name: str, slot=None, checkable: bool = False
+    ) -> QToolButton:
+        """Toolbar button with a menu: with `slot` the main part runs it and the arrow opens the menu."""
+        btn = QToolButton(self)
+        btn.setObjectName(object_name)
+        btn.setText(text)
+        btn.setToolTip(tooltip)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setMenu(menu)
+        btn.setCheckable(checkable)
+        if slot is None:
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        else:
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+            btn.clicked.connect(lambda _checked=False: slot())
+        self.toolbar.addWidget(btn)
+        return btn
+
+    def set_compression_mode(self, mode: str) -> None:
+        if mode not in self._compress_actions:
+            return
+        self.compress_mode = mode
+        self._compress_actions[mode].setChecked(True)
+        label = next(name for name, m in COMPRESSION_MODES if m == mode)
+        self.btn_compress.setToolTip(f"Compress & save as a variant in the same folder  (K)\nPreset: {label} — arrow to change")
+        self.app_settings.compression_mode = mode
+
     def _add_tb_button(
         self,
         text: str,
@@ -367,6 +465,7 @@ class HakuViewWindow(QMainWindow):
             (("Ctrl+W", "Ctrl+Q"), self.close, "Ctrl+W / Ctrl+Q", "Close window"),
             (("Ctrl+S",), self.save_current, "Ctrl+S", "Save changes (atomic in-place)"),
             (("Ctrl+Shift+S",), self.save_as_dialog, "Ctrl+Shift+S", "Save As..."),
+            (("Ctrl+,",), self.show_settings_dialog, "Ctrl+,", "Settings (theme, wheel, sorting, defaults...)"),
             (("Ctrl+Z",), self.undo_edit, "Ctrl+Z", "Undo last edit"),
             (("Ctrl+M",), self.random_item, "Ctrl+M", "Jump to random file in folder"),
             (("I", "Ctrl+I"), self._on_key_i, "I / Ctrl+I", "Media Inspector (I marks video In-point)"),
@@ -530,7 +629,13 @@ class HakuViewWindow(QMainWindow):
     def open_file_dialog(self) -> None:
         if not self._confirm_discard_or_save():
             return
-        start_dir = str(self.navigator.folder) if self.navigator.folder else str(Path.home())
+        last = Path(self.app_settings.last_folder) if self.app_settings.last_folder else None
+        if self.navigator.folder:
+            start_dir = str(self.navigator.folder)
+        elif last is not None and last.is_dir():
+            start_dir = str(last)
+        else:
+            start_dir = str(Path.home())
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Image or Video",
@@ -583,6 +688,7 @@ class HakuViewWindow(QMainWindow):
 
     def _display_current_file(self) -> bool:
         self.reset_color_adjustments(update_view=False)
+        self.canvas.set_message(None)
         current = self.navigator.current_file
         if current is None:
             self.document = None
@@ -612,7 +718,7 @@ class HakuViewWindow(QMainWindow):
         if qimg is None or qimg.isNull():
             self.document = None
             self.canvas.set_image(None)
-            self.lbl_filename.setText(f"Failed to load: {current.name}")
+            self.canvas.set_message(f"Can't open {current.name}\n\n{describe_load_failure(current)}\n\n← / → to keep browsing")
             self._update_ui_state()
             return False
 
@@ -769,7 +875,7 @@ class HakuViewWindow(QMainWindow):
         """One-click compress the current image and save as a new variant in the same folder."""
         if self.document is None or self.current_is_video:
             return None
-        mode = str(self.combo_compress.currentData() or "lossless")
+        mode = self.compress_mode
         try:
             variant_path, orig_bytes, new_bytes = compress_image_as_variant(self.document, mode=mode)
             # Re-scan folder so the new variant is included in folder navigation while keeping current file active
@@ -1004,9 +1110,7 @@ class HakuViewWindow(QMainWindow):
         self.btn_next.setEnabled(self.navigator.count > 1)
         self.btn_color.setEnabled(has_file)
 
-        self.btn_rot_left.setEnabled(is_img)
-        self.btn_rot_right.setEnabled(is_img)
-        self.btn_flip_h.setEnabled(is_img)
+        self.btn_edit.setEnabled(is_img)
         self.btn_crop.setEnabled(is_img or is_vid)
         if is_vid:
             self.btn_crop.setText("✂ Trim")
@@ -1015,7 +1119,6 @@ class HakuViewWindow(QMainWindow):
             self.btn_crop.setText("✂ Crop")
             self.btn_crop.setToolTip("Show border crop handles (or drag a box), then press C or Enter to apply the crop  (C)")
         self.btn_compress.setEnabled(is_img)
-        self.combo_compress.setEnabled(is_img)
         self.btn_fit.setEnabled(is_img)
         self.btn_actual.setEnabled(is_img)
         self.btn_info.setEnabled(has_file)
@@ -1059,7 +1162,7 @@ class HakuViewWindow(QMainWindow):
             if self._info_visible:
                 self.canvas.set_info_overlay(True, self._build_info_text())
         else:
-            self.lbl_dimensions.setText("VIDEO")
+            self.lbl_dimensions.setText("VIDEO" if is_vid else "")
             self.lbl_zoom.setText("")
             if has_color_adj:
                 self.lbl_modified.setText("● COLOR ADJ (Ctrl+S to save frame)")
@@ -1070,6 +1173,7 @@ class HakuViewWindow(QMainWindow):
         if not self._confirm_discard_or_save():
             event.ignore()
             return
+        self._save_session()
         self.video_view.stop()
         self.video_view.shutdown()
         super().closeEvent(event)
@@ -1104,13 +1208,8 @@ class HakuViewWindow(QMainWindow):
 
         add("🗜 Compress Variant (K)", self.compress_current_variant, is_img)
         presets = menu.addMenu("🎯 Compression Preset")
-        group = QActionGroup(presets)
-        cur_mode = self.combo_compress.currentData()
-        for idx, (label, mode_id) in enumerate(COMPRESSION_MODES):
-            act = presets.addAction(label, lambda index=idx: self.combo_compress.setCurrentIndex(index))
-            act.setCheckable(True)
-            act.setChecked(mode_id == cur_mode)
-            group.addAction(act)
+        for label, mode_id in COMPRESSION_MODES:
+            presets.addAction(self._compress_actions[mode_id])
         menu.addSeparator()
 
         add("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action, is_img or is_vid)
@@ -1131,6 +1230,15 @@ class HakuViewWindow(QMainWindow):
         add("⛶ Fullscreen (F)", self.toggle_fullscreen)
         add("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog, has_file)
         menu.addSeparator()
+        sort_menu = menu.addMenu("Sort Files By")
+        sort_group = QActionGroup(sort_menu)
+        for mode, label in SORT_MODES.items():
+            act = sort_menu.addAction(label, lambda m=mode: self.set_sort_mode(m))
+            act.setCheckable(True)
+            act.setChecked(self.navigator.sort_mode == mode)
+            sort_group.addAction(act)
+        menu.addSeparator()
+        add("⚙ Settings... (Ctrl+,)", self.show_settings_dialog)
         add("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog)
         add("🔄 Check for Updates...", self.check_for_updates, not self.update_checker.running)
         auto = add("Check for Updates on Startup", self._toggle_startup_update_check)

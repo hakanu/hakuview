@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -16,6 +17,46 @@ from PySide6.QtCore import QObject, QRect, QRunnable, QThreadPool, Qt, Signal
 from PySide6.QtGui import QImage, QImageReader, QImageWriter, QTransform
 
 from .formatting import human_size
+
+
+def _register_optional_plugins() -> None:
+    """Enable HEIC/HEIF decoding through Pillow when the optional pillow-heif package is installed."""
+    try:
+        import pillow_heif  # type: ignore[import-not-found]
+
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+
+
+_register_optional_plugins()
+
+
+def describe_load_failure(path: Path | str) -> str:
+    """Human-readable reason an image couldn't be decoded, for the canvas message."""
+    p = Path(path)
+    try:
+        size = p.stat().st_size
+    except OSError as exc:
+        return f"The file can't be read: {exc.strerror or exc}."
+    if size == 0:
+        return "The file is empty (0 bytes)."
+    ext = p.suffix.lower()
+    if ext in (".heic", ".heif"):
+        if importlib.util.find_spec("pillow_heif") is None:
+            return (
+                "HEIC images need the optional 'pillow-heif' package.\n"
+                "Install it with:  uv tool install --force --with pillow-heif git+https://github.com/hakanu/hakuview.git"
+            )
+    try:
+        with Image.open(p) as im:
+            im.load()
+    except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        if "cannot identify image file" in detail:
+            return "This doesn't look like a valid image (unknown format or corrupted file)."
+        return f"The image is damaged or unsupported: {detail}"
+    return "The image could not be decoded."
 
 
 def load_qimage_fast(path: Path | str) -> Optional[QImage]:

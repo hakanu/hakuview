@@ -434,12 +434,14 @@ class VideoPlayerWidget(QWidget):
     trimCompleted = Signal(Path)
     colorExportCompleted = Signal(Path)
     colorExportFailed = Signal(str)
+    playbackFailed = Signal(str)  # user-facing message
     infoRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._in_slideshow: bool = False
+        self.loop: bool = True  # replay at the end when not in a slideshow
         self._slider_dragging: bool = False
         self.trim_in_ms: Optional[int] = None
         self.trim_out_ms: Optional[int] = None
@@ -788,9 +790,18 @@ class VideoPlayerWidget(QWidget):
         self.player.setPosition(new_pos)
 
     def toggle_mute(self) -> None:
-        muted = not self.audio.isMuted()
+        self.set_muted(not self.audio.isMuted())
+
+    def set_muted(self, muted: bool) -> None:
         self.audio.setMuted(muted)
         self.mute_btn.setText("🔇" if muted else "🔊")
+
+    @property
+    def volume(self) -> int:
+        return self.volume_slider.value()
+
+    def set_volume(self, value: int) -> None:
+        self.volume_slider.setValue(max(0, min(100, int(value))))
 
     def _on_volume_changed(self, value: int) -> None:
         self.audio.setVolume(value / 100.0)
@@ -900,7 +911,7 @@ class VideoPlayerWidget(QWidget):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             if self._in_slideshow:
                 self._emit_finished_once()
-            else:
+            elif self.loop:
                 self.player.setPosition(0)
                 self.player.play()
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
@@ -909,6 +920,8 @@ class VideoPlayerWidget(QWidget):
                 self._emit_finished_once()
 
     def _on_player_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
+        name = self._current_path.name if self._current_path else "video"
+        self.playbackFailed.emit(f"Can't play {name}: {error_string or 'unsupported or damaged file'}")
         if self._in_slideshow:
             self._emit_finished_once()
 
