@@ -27,6 +27,8 @@ To update anytime:
 hakuview --update
 ```
 
+HakuView also checks GitHub for a newer release when it starts (at most every 12 hours) and offers a one-click update. Turn it off from the **⋯** menu → *Check for Updates on Startup*, or run *Check for Updates...* by hand.
+
 ---
 
 ## 📸 What It Does

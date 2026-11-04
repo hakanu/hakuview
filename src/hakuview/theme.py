@@ -140,6 +140,26 @@ APP_QSS = _qss(
     QComboBox QAbstractItemView::item:hover,
     QComboBox QAbstractItemView::item:selected { background-color: @accent_strong; color: #ffffff; }
 
+    /* ---- Message boxes & progress dialogs (update prompt, errors, About...) ---- */
+    QMessageBox, QProgressDialog { background-color: @panel; }
+    QMessageBox QLabel, QProgressDialog QLabel { color: @text; }
+    QMessageBox QCheckBox { color: @text; }
+    QMessageBox QPushButton, QProgressDialog QPushButton {
+        background-color: @surface;
+        color: @text;
+        border: 1px solid @border;
+        border-radius: 4px;
+        padding: 4px 10px;
+    }
+    QMessageBox QPushButton:hover, QProgressDialog QPushButton:hover {
+        background-color: @surface_hover;
+        border-color: @border_hover;
+    }
+    QMessageBox QPushButton:default { background-color: @accent_strong; border-color: @accent; color: #ffffff; }
+    QMessageBox QTextEdit { background-color: @window; color: @text; border: 1px solid @border; }
+    QProgressBar { background-color: @surface; border: 1px solid @border; border-radius: 4px; height: 8px; }
+    QProgressBar::chunk { background-color: @accent_strong; border-radius: 3px; }
+
     /* ---- Menus ---- */
     QMenu {
         background-color: @panel;

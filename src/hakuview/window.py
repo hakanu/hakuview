@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
+    QDesktopServices,
     QDragEnterEvent,
     QDropEvent,
     QIcon,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -37,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __app_name__, dialogs
+from . import __app_name__, __version__, dialogs, display_version
 from .canvas import ImageCanvas
 from .color_bar import ColorAdjustBar
 from .folder_scanner import SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
@@ -56,6 +59,7 @@ from .image_ops import (
 from .info_dialog import MediaInfoDialog
 from .installer import ensure_hakuview_ico
 from .theme import APP_QSS
+from .updater import RELEASES_URL, UpdateChecker, UpdateRunner, UpdateSettings, can_self_update, is_newer
 from .video_view import VideoPlayerWidget, _format_ms
 from .widgets import FullscreenControls, chevron_icon, menu_position_under, three_dots_icon
 
@@ -70,6 +74,7 @@ class HakuViewWindow(QMainWindow):
         start_slideshow: bool = False,
         slideshow_interval: float = 3.0,
         start_fullscreen: bool = False,
+        check_updates: bool = False,
     ) -> None:
         super().__init__()
 
@@ -104,6 +109,15 @@ class HakuViewWindow(QMainWindow):
 
         if start_slideshow and self.navigator.count > 0:
             self.set_slideshow(True)
+
+        self.update_settings = UpdateSettings()
+        self.update_checker = UpdateChecker(self)
+        self.update_checker.finished.connect(self._on_update_check_finished)
+        self._update_check_manual = False
+        self._update_runner: Optional[UpdateRunner] = None
+        if check_updates and self.update_settings.startup_check_due():
+            # Let the first image paint before touching the network.
+            QTimer.singleShot(2500, lambda: self.check_for_updates(manual=False))
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -1118,6 +1132,10 @@ class HakuViewWindow(QMainWindow):
         add("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog, has_file)
         menu.addSeparator()
         add("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog)
+        add("🔄 Check for Updates...", self.check_for_updates, not self.update_checker.running)
+        auto = add("Check for Updates on Startup", self._toggle_startup_update_check)
+        auto.setCheckable(True)
+        auto.setChecked(self.update_settings.check_on_startup)
         add("🦉 About HakuView...", self.show_about_dialog)
 
         if exec_menu:
@@ -1128,6 +1146,107 @@ class HakuViewWindow(QMainWindow):
         # Generated from the same tables that bind the keys, so the help can't drift.
         rows = self._KEYPRESS_HELP + [(label, text) for _seqs, _fn, label, text in self._shortcut_table if label]
         dialogs.show_shortcuts_dialog(self, rows)
+
+    # ------------------------------------------------------------------
+    # Updates
+    # ------------------------------------------------------------------
+
+    def _toggle_startup_update_check(self) -> None:
+        self.update_settings.check_on_startup = not self.update_settings.check_on_startup
+        state = "on" if self.update_settings.check_on_startup else "off"
+        self.status.showMessage(f"Update check on startup turned {state}.", 3000)
+
+    def check_for_updates(self, manual: bool = True) -> None:
+        """Ask GitHub for the newest tagged version. Manual checks also report 'up to date' / errors."""
+        self._update_check_manual = manual
+        if manual:
+            self.status.showMessage("🔄 Checking for updates...", 3000)
+        self.update_checker.start()
+
+    def _on_update_check_finished(self, latest: str, error: str) -> None:
+        manual = self._update_check_manual
+        self.update_settings.mark_checked()
+        if error:
+            if manual:
+                QMessageBox.information(self, "Check for Updates", f"Couldn't reach GitHub to check for updates.\n\n{error}")
+            return
+        if not latest or not is_newer(latest):
+            if manual:
+                QMessageBox.information(self, "Check for Updates", f"You're up to date ({__app_name__} {display_version()}).")
+            return
+        if not manual and latest == self.update_settings.skipped_version:
+            return
+        self._show_update_prompt(latest)
+
+    def _show_update_prompt(self, latest: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Update Available")
+        box.setText(f"<b>{__app_name__} {latest}</b> is available.")
+        box.setInformativeText(f"You have {__version__}.")
+        update_label = "Update Now" if can_self_update() else "Open Download Page"
+        btn_update = box.addButton(update_label, QMessageBox.ButtonRole.AcceptRole)
+        btn_skip = box.addButton("Skip This Version", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_update)
+        auto = QCheckBox("Check for updates on startup")
+        auto.setChecked(self.update_settings.check_on_startup)
+        box.setCheckBox(auto)
+        box.exec()
+
+        self.update_settings.check_on_startup = auto.isChecked()
+        clicked = box.clickedButton()
+        if clicked is btn_skip:
+            self.update_settings.skipped_version = latest
+        elif clicked is btn_update:
+            self.run_update()
+
+    def run_update(self) -> None:
+        if not can_self_update():
+            QDesktopServices.openUrl(QUrl(RELEASES_URL))
+            return
+        if self._update_runner is not None:
+            return
+        progress = QProgressDialog("Updating HakuView...", None, 0, 0, self)
+        progress.setWindowTitle("Updating")
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.show()
+
+        runner = UpdateRunner(self)
+        self._update_runner = runner
+
+        def done(ok: bool, output: str) -> None:
+            progress.close()
+            self._update_runner = None
+            runner.deleteLater()
+            self._on_update_finished(ok, output)
+
+        runner.finished.connect(done)
+        runner.start()
+
+    def _on_update_finished(self, ok: bool, output: str) -> None:
+        if not ok:
+            box = QMessageBox(QMessageBox.Icon.Warning, "Update Failed", "The update didn't complete.", parent=self)
+            box.setDetailedText(output[-4000:])
+            box.exec()
+            return
+        reply = QMessageBox.question(
+            self,
+            "Update Installed",
+            "HakuView was updated. Restart now to use the new version?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.restart()
+
+    def restart(self) -> None:
+        """Close (honoring the unsaved-changes prompt) and relaunch on the same file."""
+        current = self.navigator.current_file
+        args = ["-m", "hakuview.cli"] + ([str(current)] if current else [])
+        if self.close():
+            QProcess.startDetached(sys.executable, args)
 
     def show_about_dialog(self) -> None:
         dialogs.show_about_dialog(self)

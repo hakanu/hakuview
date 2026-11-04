@@ -138,6 +138,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         start_slideshow=args.slideshow,
         slideshow_interval=args.interval,
         start_fullscreen=args.fullscreen,
+        check_updates=True,
     )
     window.show()
     return app.exec()

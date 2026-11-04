@@ -885,3 +885,118 @@ def test_version_comes_from_package_metadata_not_a_literal() -> None:
 
     assert hakuview.__version__ not in ("", "0+unknown")
     assert hakuview.__version__ in hakuview.display_version()
+
+
+def test_version_parsing_and_comparison() -> None:
+    from hakuview.updater import is_newer, latest_version, parse_version
+
+    assert parse_version("v1.2.3") < parse_version("v1.10.0")
+    assert parse_version("0.2.1.dev4+gabc") < parse_version("0.2.1")  # dev builds come before the release
+    assert latest_version(["v0.1.0", "v0.10.0", "v0.9.9", "nightly", "v1.0.0.dev3"]) == "0.10.0"
+    assert latest_version([]) is None
+
+    assert is_newer("0.3.0", current="0.2.0")
+    assert is_newer("0.2.1", current="0.2.1.dev7+gdeadbee")
+    assert not is_newer("0.2.0", current="0.2.0")
+    assert not is_newer("0.2.0", current="0.2.1.dev1+gabc")
+    assert not is_newer("9.9.9", current="0.0.0")  # unknown local version: never nag
+
+
+def test_startup_update_check_is_throttled_and_can_be_disabled() -> None:
+    from hakuview.updater import STARTUP_CHECK_INTERVAL_SEC, UpdateSettings
+
+    settings = UpdateSettings()
+    t0 = 1_800_000_000.0
+    assert settings.check_on_startup and settings.startup_check_due(now=t0)  # never checked yet
+    settings.mark_checked(now=t0)
+    assert not settings.startup_check_due(now=t0 + 60)
+    assert settings.startup_check_due(now=t0 + STARTUP_CHECK_INTERVAL_SEC)
+    settings.check_on_startup = False
+    assert not UpdateSettings().startup_check_due(now=10**10)  # persisted
+
+
+def _window_with_fake_update_source(qtbot, monkeypatch, latest: str = "", error: str = ""):
+    win = HakuViewWindow()
+    qtbot.addWidget(win)
+
+    def fake_fetch():
+        if error:
+            raise OSError(error)
+        return latest
+
+    monkeypatch.setattr(win.update_checker, "_fetch", fake_fetch)
+    return win
+
+
+def test_update_prompt_offers_update_and_remembers_skip(qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    win = _window_with_fake_update_source(qtbot, monkeypatch, latest="99.0.0")
+    prompts = []
+
+    def fake_exec(box):
+        prompts.append(box.text())
+        skip = next(b for b in box.buttons() if b.text() == "Skip This Version")
+        box.checkBox().setChecked(False)  # user also turns off the startup check
+        skip.click()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    win.check_for_updates(manual=False)
+    qtbot.waitUntil(lambda: bool(prompts), timeout=3000)
+    assert "99.0.0" in prompts[0]
+    assert win.update_settings.skipped_version == "99.0.0"
+    assert not win.update_settings.check_on_startup
+
+    # A skipped version doesn't pop up again on automatic checks...
+    win.check_for_updates(manual=False)
+    qtbot.waitUntil(lambda: not win.update_checker.running, timeout=3000)
+    assert len(prompts) == 1
+    # ...but an explicit "Check for Updates..." still shows it.
+    win.check_for_updates(manual=True)
+    qtbot.waitUntil(lambda: len(prompts) == 2, timeout=3000)
+
+
+def test_manual_update_check_reports_up_to_date_and_offline(qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda parent, title, text: shown.append(text))
+
+    win = _window_with_fake_update_source(qtbot, monkeypatch, latest="0.0.1")
+    win.check_for_updates(manual=True)
+    qtbot.waitUntil(lambda: bool(shown), timeout=3000)
+    assert "up to date" in shown[-1]
+
+    win = _window_with_fake_update_source(qtbot, monkeypatch, error="Network is unreachable")
+    win.check_for_updates(manual=True)
+    qtbot.waitUntil(lambda: len(shown) == 2, timeout=3000)
+    assert "Network is unreachable" in shown[-1]
+
+    # Automatic checks stay silent when offline.
+    win.check_for_updates(manual=False)
+    qtbot.waitUntil(lambda: not win.update_checker.running, timeout=3000)
+    assert len(shown) == 2
+
+
+def test_update_menu_entries_and_startup_toggle(qtbot) -> None:
+    win = HakuViewWindow()
+    qtbot.addWidget(win)
+    menu = win.show_more_options_menu(exec_menu=False)
+    actions = {a.text(): a for a in menu.actions()}
+    assert "🔄 Check for Updates..." in actions
+    toggle = actions["Check for Updates on Startup"]
+    assert toggle.isCheckable() and toggle.isChecked()
+    toggle.trigger()
+    assert not win.update_settings.check_on_startup
+
+
+def test_windows_never_check_for_updates_unless_asked(qtbot, monkeypatch) -> None:
+    from hakuview import updater
+
+    calls = []
+    monkeypatch.setattr(updater, "fetch_latest_version", lambda *a, **k: calls.append(1) or "")
+    win = HakuViewWindow()
+    qtbot.addWidget(win)
+    qtbot.wait(100)
+    assert calls == [] and not win.update_checker.running
