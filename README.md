@@ -1,7 +1,11 @@
 # HakuView 🦉
 
 > **Fast, lightweight IrfanView-inspired image and video viewer for Ubuntu & Windows.**  
-> Open any image from the middle of a folder, cycle with arrow keys, border-crop, rotate, compress, and run slideshows without lag.
+> Open any image from the middle of a folder, cycle with arrow keys, border-crop, rotate, compress, trim videos, and run slideshows without lag.
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="HakuView Screenshot" width="820" />
+</p>
 
 ---
 
