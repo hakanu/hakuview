@@ -174,3 +174,22 @@ def test_window_cycle_rotate_crop_and_slideshow(tmp_path: Path, qtbot) -> None:
     assert win.isVisible()
     close_actions[0].trigger()
     assert not win.isVisible()
+
+
+def test_clickable_video_widget(qtbot) -> None:
+    from hakuview.video_view import VideoPlayerWidget
+
+    widget = VideoPlayerWidget()
+    qtbot.addWidget(widget)
+
+    # Click video widget calls toggle_play_pause
+    clicks = []
+    widget.toggle_play_pause = lambda: clicks.append(True)
+    widget.video_widget.clicked.emit()
+    assert len(clicks) == 1
+
+    # Double click emits doubleClicked
+    double_clicks = []
+    widget.doubleClicked.connect(lambda: double_clicks.append(True))
+    widget.video_widget.doubleClicked.emit()
+    assert len(double_clicks) == 1

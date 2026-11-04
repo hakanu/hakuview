@@ -169,6 +169,7 @@ class HakuViewWindow(QMainWindow):
         self.canvas.zoomChanged.connect(self._on_zoom_changed)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
         self.canvas.doubleClicked.connect(self.toggle_fullscreen)
+        self.video_view.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
         self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
 

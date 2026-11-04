@@ -60,7 +60,7 @@ hakuview --update
 | `F` or `Double-Click` | Fullscreen |
 | `+` / `-` or `Wheel` | Zoom (centered at mouse) |
 | `0` / `1` | Fit to window / 100% actual size |
-| `Space` | Video Play/Pause (or hold + drag to pan zoomed image) |
+| `Click Video` or `Space` | Play / Pause (stop) video |
 | `Ctrl + W` / `Esc` | Close window / Exit fullscreen |
 
 ---

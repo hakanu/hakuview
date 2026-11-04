@@ -8,7 +8,8 @@ import shutil
 import subprocess
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -100,6 +101,36 @@ class _TranscodeWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class ClickableVideoWidget(QVideoWidget):
+    """QVideoWidget that emits clicked and doubleClicked signals on mouse events."""
+
+    clicked = Signal()
+    doubleClicked = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(220)
+        self._click_timer.timeout.connect(self.clicked.emit)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.start()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.stop()
+            self.doubleClicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class VideoPlayerWidget(QWidget):
     """Embedded video player with transport controls, AV1 compatibility banner, and transcode tool."""
 
@@ -119,8 +150,10 @@ class VideoPlayerWidget(QWidget):
         self.audio.setVolume(0.8)
         self.player.setAudioOutput(self.audio)
 
-        self.video_widget = QVideoWidget(self)
+        self.video_widget = ClickableVideoWidget(self)
         self.video_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.video_widget.clicked.connect(self.toggle_play_pause)
+        self.video_widget.doubleClicked.connect(self.doubleClicked.emit)
         self.player.setVideoOutput(self.video_widget)
 
         # Transport bar
