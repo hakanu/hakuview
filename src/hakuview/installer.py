@@ -287,10 +287,23 @@ def run_self_update() -> int:
     is_local_checkout = (pkg_root / "pyproject.toml").exists()
 
     if is_local_checkout and (pkg_root / ".git").exists() and shutil.which("git"):
-        print(f"Updating git repository at {pkg_root}...")
-        res = subprocess.run(["git", "-C", str(pkg_root), "pull", "--ff-only"], check=False)
-        if res.returncode != 0:
-            return res.returncode
+        # Check if an upstream tracking branch is configured before attempting git pull
+        has_upstream = (
+            subprocess.run(
+                ["git", "-C", str(pkg_root), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+        if has_upstream:
+            print(f"Pulling latest git changes at {pkg_root}...")
+            res = subprocess.run(["git", "-C", str(pkg_root), "pull", "--ff-only"], check=False)
+            if res.returncode != 0:
+                print("Warning: git pull failed; proceeding with package upgrade...")
+        else:
+            print(f"Local checkout at {pkg_root} has no upstream tracking branch; skipping git pull.")
 
     if shutil.which("uv"):
         print("Upgrading hakuview via `uv tool`...")
