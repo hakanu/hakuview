@@ -22,6 +22,14 @@ from hakuview.window import HakuViewWindow
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+def _all_menu_actions(menu):
+    """Actions of a menu including those inside its submenus."""
+    for act in menu.actions():
+        yield act
+        if act.menu() is not None:
+            yield from _all_menu_actions(act.menu())
+
+
 def _create_sample_image(path: Path, width: int = 120, height: int = 80, color: QColor = QColor(40, 120, 220)) -> None:
     img = QImage(width, height, QImage.Format.Format_RGB32)
     img.fill(color)
@@ -276,7 +284,7 @@ def test_show_more_options_menu_execution(tmp_path: Path, qtbot) -> None:
     # Image mode (exec_menu=False avoids modal block)
     menu_img = win.show_more_options_menu(exec_menu=False)
     assert menu_img is not None
-    action_texts = [a.text() for a in menu_img.actions()]
+    action_texts = [a.text() for a in _all_menu_actions(menu_img)]
     assert any("Border Crop" in t for t in action_texts)
     assert any("Media Inspector" in t for t in action_texts)
 
@@ -284,7 +292,7 @@ def test_show_more_options_menu_execution(tmp_path: Path, qtbot) -> None:
     win.current_is_video = True
     menu_vid = win.show_more_options_menu(exec_menu=False)
     assert menu_vid is not None
-    vid_actions = [a.text() for a in menu_vid.actions()]
+    vid_actions = [a.text() for a in _all_menu_actions(menu_vid)]
     assert any("Trim Video" in t for t in vid_actions)
 
 
@@ -512,9 +520,10 @@ def test_random_moved_to_more_options_menu(tmp_path: Path, qtbot) -> None:
 
     # Random is under 3 dots menu
     menu = win.show_more_options_menu(exec_menu=False)
-    actions = [a.text() for a in menu.actions()]
+    actions = [a.text() for a in _all_menu_actions(menu)]
     assert any("Random File" in t for t in actions)
-    assert any("Color Scaling" in t for t in actions)
+    assert any("Brightness && Contrast" in t for t in actions)
+    assert len(menu.actions()) <= 20  # top level stays short; the rest is grouped in submenus
 
 
 def test_video_color_scaling_and_frame_save(tmp_path: Path, qtbot) -> None:
@@ -995,7 +1004,7 @@ def test_update_menu_entries_and_startup_toggle(qtbot) -> None:
     win = HakuViewWindow()
     qtbot.addWidget(win)
     menu = win.show_more_options_menu(exec_menu=False)
-    actions = {a.text(): a for a in menu.actions()}
+    actions = {a.text(): a for a in _all_menu_actions(menu)}
     assert "🔄 Check for Updates..." in actions
     toggle = actions["Check for Updates on Startup"]
     assert toggle.isCheckable() and toggle.isChecked()
@@ -1146,3 +1155,219 @@ def test_toolbar_fits_default_window_width(qtbot) -> None:
     win = HakuViewWindow()
     qtbot.addWidget(win)
     assert win.toolbar.sizeHint().width() < 1180 - 60
+
+
+def test_copy_image_and_path_to_clipboard(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    _create_sample_image(tmp_path / "pic.png", width=64, height=32, color=QColor(100, 100, 100))
+    win = HakuViewWindow(initial_path=tmp_path / "pic.png")
+    qtbot.addWidget(win)
+    win.color_bar.slider_brightness.setValue(50)  # what's on screen is what gets copied
+    assert win.copy_image_to_clipboard()
+    copied = QApplication.clipboard().image()
+    assert (copied.width(), copied.height()) == (64, 32)
+    assert copied.pixelColor(5, 5).red() > 150
+    win.copy_file_path()
+    assert QApplication.clipboard().text() == str(tmp_path / "pic.png")
+
+
+def test_rename_updates_disk_folder_list_and_unsaved_edits(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+    for name in ("a.png", "b.png", "c.png"):
+        _create_sample_image(tmp_path / name, width=40, height=20)
+    win = HakuViewWindow(initial_path=tmp_path / "a.png")
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+    win.rotate_right()  # unsaved edit must survive the rename
+
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+    assert win.rename_current_file("b.png") is None and "already exists" in warnings[-1]
+    assert win.rename_current_file("x/y.png") is None and "can't contain" in warnings[-1]
+
+    target = win.rename_current_file("zebra.png")
+    assert target == tmp_path / "zebra.png" and target.exists() and not (tmp_path / "a.png").exists()
+    assert win.navigator.current_file == target
+    assert [p.name for p in win.navigator.files] == ["b.png", "c.png", "zebra.png"]  # re-sorted
+    assert win.document.path == target and win.document.modified
+
+    # F2 opens a dialog pre-filled with the current name.
+    seen = []
+
+    def fake_exec(dlg):
+        seen.append(dlg.textValue())
+        dlg.setTextValue("final.png")
+        return 1
+
+    monkeypatch.setattr(QInputDialog, "exec", fake_exec)
+    assert win.rename_current_file() == tmp_path / "final.png"
+    assert seen == ["zebra.png"]
+
+
+def test_show_in_file_manager_selects_file_via_dbus_with_folder_fallback(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import sys as _sys
+    from PySide6.QtCore import QProcess
+    from PySide6.QtGui import QDesktopServices
+
+    if not _sys.platform.startswith("linux"):
+        pytest.skip("Linux D-Bus path")
+    _create_sample_image(tmp_path / "it's here.png")
+    win = HakuViewWindow(initial_path=tmp_path / "it's here.png")
+    qtbot.addWidget(win)
+
+    started, opened = [], []
+    monkeypatch.setattr(QProcess, "start", lambda self, prog, args: started.append((self, prog, args)))
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+    win.show_in_file_manager()
+    proc, prog, args = started[0]
+    assert prog == "gdbus" and "org.freedesktop.FileManager1.ShowItems" in args
+    assert "it%27s%20here.png" in args[-2]  # quoted safely for the GVariant string
+    proc.finished.emit(1, QProcess.ExitStatus.NormalExit)  # no FileManager1 service -> open the folder
+    assert opened == [str(tmp_path)]
+
+
+def test_video_frame_step_and_speed_keys(tmp_path: Path, qtbot) -> None:
+    import shutil
+    import subprocess
+    from PySide6.QtTest import QTest
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    clip = tmp_path / "clip.mp4"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=3",
+         "-pix_fmt", "yuv420p", str(clip)],
+        check=True,
+    )
+    win = HakuViewWindow(initial_path=clip)
+    qtbot.addWidget(win)
+    _show_active(win, qtbot)
+    player = win.video_view.player
+    try:
+        qtbot.waitUntil(lambda: player.duration() > 0, timeout=5000)
+    except Exception:
+        pytest.skip("no video decoding backend available")
+
+    player.pause()
+    player.setPosition(1000)
+    qtbot.waitUntil(lambda: abs(player.position() - 1000) < 50, timeout=3000)
+    QTest.keyClick(win, Qt.Key.Key_Period)
+    qtbot.waitUntil(lambda: player.position() > 1000, timeout=3000)
+    assert 80 <= player.position() - 1000 <= 120  # one frame at 10 fps
+    assert player.playbackState() != player.PlaybackState.PlayingState
+
+    zoom = win.canvas.zoom_scale
+    QTest.keyClick(win, Qt.Key.Key_Plus)
+    assert player.playbackRate() == 1.25 and win.canvas.zoom_scale == zoom  # speed, not zoom
+    QTest.keyClick(win, Qt.Key.Key_Minus)
+    QTest.keyClick(win, Qt.Key.Key_Minus)
+    assert player.playbackRate() == 0.75
+
+
+def test_auto_reload_on_external_change_and_folder_rescan(tmp_path: Path, qtbot) -> None:
+    import os as _os
+
+    _create_sample_image(tmp_path / "a.png", width=40, height=20)
+    _create_sample_image(tmp_path / "b.png", width=40, height=20)
+    win = HakuViewWindow(initial_path=tmp_path / "a.png")
+    qtbot.addWidget(win)
+
+    # Another program rewrites the file -> reloaded.
+    img = QImage(80, 60, QImage.Format.Format_RGB32)
+    img.fill(QColor("red"))
+    img.save(str(tmp_path / "a.png"))
+    qtbot.waitUntil(lambda: win.document.current.width() == 80, timeout=4000)
+
+    # New files in the folder show up in navigation.
+    _create_sample_image(tmp_path / "c.png")
+    qtbot.waitUntil(lambda: win.navigator.count == 3, timeout=4000)
+    assert win.navigator.current_file.name == "a.png"
+
+    # Unsaved edits are never thrown away by a reload.
+    win.rotate_right()
+    img.fill(QColor("blue"))
+    img.save(str(tmp_path / "a.png"))
+    qtbot.waitUntil(lambda: "unsaved edits were kept" in win.status.currentMessage(), timeout=4000)
+    assert win.document.modified
+
+    # The shown file is deleted elsewhere -> the viewer moves on instead of showing a ghost.
+    win.document.reset()
+    _os.remove(tmp_path / "a.png")
+    qtbot.waitUntil(lambda: win.navigator.current_file is not None and win.navigator.current_file.name != "a.png", timeout=4000)
+    assert win.navigator.count == 2
+
+
+def _phone_jpeg(path: Path, size=(320, 240)) -> None:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(img)
+    for i in range(0, size[0], 6):
+        draw.line([(i, 0), (size[0] - i, size[1])], fill=(i % 255, 120, 255 - i % 255), width=2)
+    img.save(path, quality=75, subsampling=2)
+
+
+def test_saving_rotated_jpeg_keeps_original_quality_without_jpegtran(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PIL import Image
+    from hakuview import image_ops
+
+    monkeypatch.setattr(image_ops.shutil, "which", lambda name: None)
+    src = tmp_path / "photo.jpg"
+    _phone_jpeg(src)
+    before_size = src.stat().st_size
+    with Image.open(src) as im:
+        tables = im.quantization
+
+    win = HakuViewWindow(initial_path=src)
+    qtbot.addWidget(win)
+    win.rotate_right()
+    assert win.save_current()
+    assert "kept original JPEG quality" in win.status.currentMessage()
+    with Image.open(src) as im:
+        assert im.size == (240, 320) and im.quantization == tables
+    assert src.stat().st_size < before_size * 1.3  # was ~2x with the old fixed quality=95
+
+
+def test_rotate_only_jpeg_edit_uses_lossless_jpegtran(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import stat
+    import sys as _sys
+
+    # Stand-in jpegtran: records its arguments and copies input to -outfile.
+    log = tmp_path / "jpegtran-args.txt"
+    fake = tmp_path / "bin" / "jpegtran"
+    fake.parent.mkdir()
+    fake.write_text(
+        f"#!{_sys.executable}\n"
+        "import shutil, sys\n"
+        f"open({str(log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "args = sys.argv[1:]\n"
+        "shutil.copy(args[-1], args[args.index('-outfile') + 1])\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{_os_environ_path()}")
+
+    src = tmp_path / "photo.jpg"
+    _phone_jpeg(src)
+    win = HakuViewWindow(initial_path=src)
+    qtbot.addWidget(win)
+    win.rotate_right()
+    win.rotate_right()
+    win.flip_horizontal()  # = flip vertical overall
+    assert win.save_current()
+    assert "lossless rotate" in win.status.currentMessage()
+    assert log.read_text().split()[:5] == ["-perfect", "-copy", "all", "-flip", "vertical"]
+
+    # A crop can't be done by jpegtran -> falls back to the matched re-encode.
+    log.write_text("")
+    win.canvas._selection = QRect(0, 0, 100, 100)
+    win.apply_crop()
+    assert win.save_current()
+    assert log.read_text() == "" and "kept original JPEG quality" in win.status.currentMessage()
+
+
+def _os_environ_path() -> str:
+    import os as _os
+
+    return _os.environ.get("PATH", "")

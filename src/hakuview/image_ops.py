@@ -355,8 +355,24 @@ def compress_image_as_variant(
     return out_path, orig_bytes, new_bytes
 
 
+LOSSLESS_JPEG_TRANSFORMS = ("rot90", "rot180", "rot270", "flip_h", "flip_v", "transpose", "transverse")
+_JPEGTRAN_ARGS = {
+    "rot90": ["-rotate", "90"],
+    "rot180": ["-rotate", "180"],
+    "rot270": ["-rotate", "270"],
+    "flip_h": ["-flip", "horizontal"],
+    "flip_v": ["-flip", "vertical"],
+    "transpose": ["-transpose"],
+    "transverse": ["-transverse"],
+}
+
+
 class ImageDocument:
-    """Tracks the currently displayed image, its undo stack, and modified flag."""
+    """Tracks the currently displayed image, its undo stack, and modified flag.
+
+    `ops` records the edits since the last save ("rotate_left", "flip_h", "crop", ...) so a
+    rotate/flip-only edit of a JPEG can be saved losslessly with jpegtran.
+    """
 
     MAX_UNDO = 10
 
@@ -365,28 +381,30 @@ class ImageDocument:
         self.original: QImage = image
         self.current: QImage = image
         self.undo_stack: List[QImage] = []
+        self.ops: List[str] = []
         self.modified: bool = False
 
-    def _push_undo(self) -> None:
+    def _push_undo(self, op: str) -> None:
         self.undo_stack.append(self.current)
+        self.ops.append(op)
         if len(self.undo_stack) > self.MAX_UNDO:
             self.undo_stack.pop(0)
         self.modified = True
 
     def rotate_left(self) -> None:
-        self._push_undo()
+        self._push_undo("rotate_left")
         self.current = rotate_qimage(self.current, -90)
 
     def rotate_right(self) -> None:
-        self._push_undo()
+        self._push_undo("rotate_right")
         self.current = rotate_qimage(self.current, 90)
 
     def flip_horizontal(self) -> None:
-        self._push_undo()
+        self._push_undo("flip_h")
         self.current = flip_qimage(self.current, horizontal=True, vertical=False)
 
     def flip_vertical(self) -> None:
-        self._push_undo()
+        self._push_undo("flip_v")
         self.current = flip_qimage(self.current, horizontal=False, vertical=True)
 
     def crop(self, rect: QRect) -> bool:
@@ -395,7 +413,7 @@ class ImageDocument:
             return False
         if bounded == self.current.rect():
             return False
-        self._push_undo()
+        self._push_undo("crop")
         self.current = crop_qimage(self.current, bounded)
         return True
 
@@ -403,6 +421,8 @@ class ImageDocument:
         if not self.undo_stack:
             return False
         self.current = self.undo_stack.pop()
+        if self.ops:
+            self.ops.pop()
         self.modified = bool(self.undo_stack)
         return True
 
@@ -411,6 +431,7 @@ class ImageDocument:
             return False
         self.current = self.original
         self.undo_stack.clear()
+        self.ops.clear()
         self.modified = False
         return True
 
@@ -419,7 +440,95 @@ class ImageDocument:
             self.path = new_path
         self.original = self.current
         self.undo_stack.clear()
+        self.ops.clear()
         self.modified = False
+
+    def net_transform(self) -> Optional[str]:
+        """The single jpegtran transform equal to all edits so far, "identity", or None if lossy.
+
+        Rotations and flips compose into one of 8 orientations; rather than doing the group
+        algebra by hand, apply the same ops to a tiny asymmetric image and see which
+        candidate transform produces the same pixels.
+        """
+        if any(op not in ("rotate_left", "rotate_right", "flip_h", "flip_v") for op in self.ops):
+            return None
+        probe = QImage(3, 2, QImage.Format.Format_RGB32)
+        for i, (x, y) in enumerate((x, y) for y in range(2) for x in range(3)):
+            probe.setPixel(x, y, 0xFF000000 | (i * 40 << 16) | (255 - i * 40))
+        edited = probe
+        for op in self.ops:
+            edited = {
+                "rotate_left": lambda im: rotate_qimage(im, -90),
+                "rotate_right": lambda im: rotate_qimage(im, 90),
+                "flip_h": lambda im: flip_qimage(im, horizontal=True),
+                "flip_v": lambda im: flip_qimage(im, vertical=True),
+            }[op](edited)
+        candidates = {
+            "identity": probe,
+            "rot90": rotate_qimage(probe, 90),
+            "rot180": rotate_qimage(probe, 180),
+            "rot270": rotate_qimage(probe, -90),
+            "flip_h": flip_qimage(probe, horizontal=True),
+            "flip_v": flip_qimage(probe, vertical=True),
+            "transpose": flip_qimage(rotate_qimage(probe, 90), horizontal=True),
+            "transverse": flip_qimage(rotate_qimage(probe, -90), horizontal=True),
+        }
+        return next((name for name, im in candidates.items() if im == edited), None)
+
+
+def _exif_orientation(path: Path) -> int:
+    try:
+        with Image.open(path) as im:
+            return int(im.getexif().get(0x0112, 1) or 1)
+    except Exception:
+        return 1
+
+
+def jpegtran_lossless_save(src: Path, dest: Path, transform: str) -> bool:
+    """Rotate/flip a JPEG without re-encoding (atomic). False if not possible -> caller re-encodes.
+
+    Requires jpegtran, a file whose stored pixels match what's displayed (EXIF Orientation 1),
+    and -perfect: dimensions must be whole MCU blocks, otherwise jpegtran would have to drop
+    or garble the edge pixels.
+    """
+    jpegtran = shutil.which("jpegtran")
+    if not jpegtran or transform not in _JPEGTRAN_ARGS or _exif_orientation(src) != 1:
+        return False
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}_tmp_", suffix=dest.suffix, dir=str(dest.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        res = subprocess.run(
+            [jpegtran, "-perfect", "-copy", "all", *_JPEGTRAN_ARGS[transform], "-outfile", str(tmp), str(src)],
+            capture_output=True,
+            check=False,
+        )
+        if res.returncode != 0 or tmp.stat().st_size == 0:
+            return False
+        if dest.exists():
+            os.chmod(tmp, dest.stat().st_mode)
+        os.replace(tmp, dest)
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def save_jpeg_matching_source(image: QImage, src: Path, dest: Path) -> None:
+    """Re-encode an edited JPEG with the source's quantization tables (atomic).
+
+    Saving at a fixed quality 95 roughly doubles already-compressed photos (e.g. from
+    messaging apps); matching the source keeps the size and quality where they were.
+    """
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}_tmp_", suffix=dest.suffix, dir=str(dest.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        _save_jpeg_like_source(_qimage_to_pil(image), src, tmp)
+        if dest.exists():
+            os.chmod(tmp, dest.stat().st_mode)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class _PreloadSignals(QObject):

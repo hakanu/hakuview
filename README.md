@@ -71,12 +71,16 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `K` | **1-Click Compress** & save variant |
 | `I` or `Ctrl + I` | **Media Inspector / Info Card** (Bitrate, Compression ratio, Codecs, EXIF) |
 | `Ctrl + Z` | Undo last edit |
-| `Ctrl + S` | Save changes (saves as new image if color scaling is active) |
+| `Ctrl + S` | Save changes (saves as new image if color scaling is active). Rotated/flipped JPEGs are saved losslessly when `jpegtran` is installed, otherwise at the original quality |
 | `[ / I` and `] / O` | **Mark Video In / Out points** for trimming |
 | `T` | **Export Trimmed Video** (Instant lossless stream copy) |
 | `W` or `F5` | Toggle Slideshow (`[` and `]` change speed during photo view) |
 | `F` or `Double-Click` | Fullscreen |
-| `+` / `-` or `Wheel` | Zoom (centered at mouse) |
+| `+` / `-` or `Wheel` | Zoom (centered at mouse); on video: playback speed. The wheel can step through files instead (Settings) |
+| `,` / `.` | Video: step one frame back / forward |
+| `Ctrl + C` / `Ctrl + Shift + C` | Copy image (or video frame) / copy file path |
+| `F2` | Rename the current file |
+| `Ctrl + ,` | Settings (theme, wheel, sorting, defaults) |
 | `0` / `1` | Fit to window / 100% actual size |
 | `Click Video` or `Space` | Play / Pause (stop) video |
 | `Ctrl + W` / `Esc` | Close window / Exit fullscreen / Clear trim |

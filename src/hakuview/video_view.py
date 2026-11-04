@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QSizeF, QThread, QThreadPool, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
+from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QComboBox,
@@ -27,6 +27,9 @@ from PySide6.QtWidgets import (
 
 
 from .image_ops import _next_variant_path, apply_color_lut, color_lut, color_lut_params
+
+
+PLAYBACK_SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0)
 
 
 def _format_ms(ms: int) -> str:
@@ -533,9 +536,9 @@ class VideoPlayerWidget(QWidget):
 
         self.speed_combo = QComboBox()
         self.speed_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        for label, rate in [("0.5x", 0.5), ("1.0x", 1.0), ("1.25x", 1.25), ("1.5x", 1.5), ("2.0x", 2.0)]:
-            self.speed_combo.addItem(label, rate)
-        self.speed_combo.setCurrentIndex(1)
+        for rate in PLAYBACK_SPEEDS:
+            self.speed_combo.addItem(f"{rate:g}x", rate)
+        self.speed_combo.setCurrentIndex(PLAYBACK_SPEEDS.index(1.0))
         self.speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         bar_layout.addWidget(self.speed_combo)
 
@@ -870,6 +873,24 @@ class VideoPlayerWidget(QWidget):
         except Exception:
             pass
         return None
+
+    def step_speed(self, direction: int) -> float:
+        """Next faster (+1) / slower (-1) playback speed; returns the new rate."""
+        index = max(0, min(self.speed_combo.count() - 1, self.speed_combo.currentIndex() + direction))
+        self.speed_combo.setCurrentIndex(index)
+        return float(self.speed_combo.itemData(index))
+
+    def step_frame(self, direction: int) -> None:
+        """Pause and move one frame forward (+1) or back (-1)."""
+        self.player.pause()
+        fps = self.player.metaData().value(QMediaMetaData.Key.VideoFrameRate)
+        try:
+            frame_ms = 1000.0 / float(fps) if fps and float(fps) > 0 else 1000.0 / 30
+        except (TypeError, ValueError):
+            frame_ms = 1000.0 / 30
+        new_pos = self.player.position() + direction * max(1, round(frame_ms))
+        dur = self.player.duration()
+        self.player.setPosition(max(0, min(dur, new_pos) if dur > 0 else new_pos))
 
     def _on_speed_changed(self, index: int) -> None:
         rate = self.speed_combo.itemData(index)

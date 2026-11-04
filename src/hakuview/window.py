@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QProcess, QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QGuiApplication,
     QAction,
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
+    QInputDialog,
+    QLineEdit,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -56,6 +59,8 @@ from .image_ops import (
     describe_load_failure,
     compress_image_as_variant,
     is_animated_image,
+    jpegtran_lossless_save,
+    save_jpeg_matching_source,
     _next_variant_path,
     save_qimage_atomic,
 )
@@ -116,6 +121,16 @@ class HakuViewWindow(QMainWindow):
         if geometry is not None:
             self.restoreGeometry(geometry)
         self.setAcceptDrops(True)
+
+        self._ignore_watch_until = 0.0
+        self.watcher = QFileSystemWatcher(self)
+        self.watcher.fileChanged.connect(self._on_watched_file_changed)
+        self.watcher.directoryChanged.connect(self._on_watched_dir_changed)
+        # Debounced: editors write files in several steps, downloads create many events.
+        self._file_reload_timer = QTimer(self, singleShot=True, interval=300)
+        self._file_reload_timer.timeout.connect(self._reload_changed_file)
+        self._dir_rescan_timer = QTimer(self, singleShot=True, interval=500)
+        self._dir_rescan_timer.timeout.connect(self._rescan_changed_folder)
 
         self.update_checker = UpdateChecker(self)
         self.update_checker.finished.connect(self._on_update_check_finished)
@@ -484,8 +499,13 @@ class HakuViewWindow(QMainWindow):
             (("T",), self._on_key_t, "T", "Export trimmed video clip (FFmpeg)"),
             (("M",), self._on_key_m, "M", "Mute / unmute video"),
             (("F", "F11"), self.toggle_fullscreen, "F / F11 / Double-Click", "Toggle Fullscreen"),
-            (("+", "="), self.canvas.zoom_in, "+ / - or Wheel", "Zoom (centered at mouse)"),
-            (("-",), self.canvas.zoom_out, None, None),
+            (("+", "="), self._on_key_plus, "+ / - or Wheel", "Zoom image — video: playback speed up / down"),
+            (("-",), self._on_key_minus, None, None),
+            ((",",), lambda: self._on_key_frame_step(-1), ", / .", "Video: step one frame back / forward"),
+            ((".",), lambda: self._on_key_frame_step(1), None, None),
+            (("Ctrl+C",), self.copy_image_to_clipboard, "Ctrl+C", "Copy image (or current video frame)"),
+            (("Ctrl+Shift+C",), self.copy_file_path, "Ctrl+Shift+C", "Copy file path"),
+            (("F2",), self.rename_current_file, "F2", "Rename file"),
             (("0",), self.canvas.zoom_fit, "0 / 1", "Fit to window / 100% 1:1 size"),
             (("1",), self.canvas.zoom_actual, None, None),
             (("Ctrl+A",), self.canvas.select_all, "Ctrl+A", "Select whole image for cropping"),
@@ -530,6 +550,22 @@ class HakuViewWindow(QMainWindow):
             self._mark_trim_out()
         else:
             self.spin_interval.setValue(self.spin_interval.value() + 0.5)
+
+    def _on_key_plus(self) -> None:
+        if self.current_is_video:
+            self.status.showMessage(f"Speed {self.video_view.step_speed(1):g}×", 1500)
+        else:
+            self.canvas.zoom_in()
+
+    def _on_key_minus(self) -> None:
+        if self.current_is_video:
+            self.status.showMessage(f"Speed {self.video_view.step_speed(-1):g}×", 1500)
+        else:
+            self.canvas.zoom_out()
+
+    def _on_key_frame_step(self, direction: int) -> None:
+        if self.current_is_video:
+            self.video_view.step_frame(direction)
 
     def _on_key_t(self) -> None:
         if self.current_is_video:
@@ -689,6 +725,7 @@ class HakuViewWindow(QMainWindow):
     def _display_current_file(self) -> bool:
         self.reset_color_adjustments(update_view=False)
         self.canvas.set_message(None)
+        self._watch_current()
         current = self.navigator.current_file
         if current is None:
             self.document = None
@@ -832,16 +869,37 @@ class HakuViewWindow(QMainWindow):
             )
             return False
         try:
-            save_qimage_atomic(self.document.current, self.document.path)
+            how = self._write_document(self.document.path)
             self.cache.invalidate(self.document.path)
             self.cache.put(self.document.path, self.document.current)
             self.document.mark_saved()
             self._update_ui_state()
-            self.status.showMessage(f"Saved {self.document.path.name}", 3000)
+            self.status.showMessage(f"Saved {self.document.path.name}{how}", 4000)
             return True
         except Exception as exc:
             QMessageBox.critical(self, "Save Error", f"Could not save {self.document.path}:\n{exc}")
             return False
+
+    def _write_document(self, dest: Path) -> str:
+        """Write the edited image to `dest` the least lossy way; returns a note for the status bar.
+
+        JPEG -> JPEG: rotate/flip-only edits use jpegtran (no re-encoding at all) when it's
+        installed; anything else is re-encoded with the source's own quality tables so the
+        file doesn't balloon. Other formats go through the generic atomic writer.
+        """
+        doc = self.document
+        jpegs = (".jpg", ".jpeg")
+        self._ignore_watch_until = time.monotonic() + 1.5  # our own write isn't an external change
+        if doc.path.suffix.lower() in jpegs and dest.suffix.lower() in jpegs and doc.path.exists():
+            transform = doc.net_transform()
+            if transform == "identity" and dest == doc.path:
+                return " (no pixel changes)"
+            if transform not in (None, "identity") and jpegtran_lossless_save(doc.path, dest, transform):
+                return " (lossless rotate, no re-encoding)"
+            save_jpeg_matching_source(doc.current, doc.path, dest)
+            return " (kept original JPEG quality)"
+        save_qimage_atomic(doc.current, dest)
+        return ""
 
     def save_as_dialog(self) -> bool:
         if self.document is None or self.current_is_video:
@@ -857,7 +915,7 @@ class HakuViewWindow(QMainWindow):
             return False
         dest = Path(out_path)
         try:
-            save_qimage_atomic(self.document.current, dest)
+            how = self._write_document(dest)
             self.cache.invalidate(dest)
             self.cache.put(dest, self.document.current)
             self.document.mark_saved(dest)
@@ -865,7 +923,7 @@ class HakuViewWindow(QMainWindow):
             if self.navigator.folder and dest.parent.resolve() == self.navigator.folder.resolve():
                 self.navigator.load_target(dest)
             self._update_ui_state()
-            self.status.showMessage(f"Saved as {dest.name}", 3000)
+            self.status.showMessage(f"Saved as {dest.name}{how}", 4000)
             return True
         except Exception as exc:
             QMessageBox.critical(self, "Save Error", f"Could not save {dest}:\n{exc}")
@@ -926,6 +984,168 @@ class HakuViewWindow(QMainWindow):
             self.document.reset()
             return True
         return False
+
+    # ------------------------------------------------------------------
+    # File operations: clipboard, rename, file manager
+    # ------------------------------------------------------------------
+
+    def copy_image_to_clipboard(self) -> bool:
+        """Copy what's on screen (with any brightness/contrast) as an image."""
+        if self.current_is_video:
+            image = self.video_view.grab_current_frame()
+        else:
+            image = self.document.current if self.document is not None else None
+        if image is None or image.isNull():
+            self.status.showMessage("Nothing to copy.", 2000)
+            return False
+        image = adjust_qimage_color(image, self.color_bar.brightness, self.color_bar.contrast)
+        QApplication.clipboard().setImage(image)
+        what = "video frame" if self.current_is_video else "image"
+        self.status.showMessage(f"📋 Copied {what} ({image.width()} × {image.height()}) to the clipboard.", 3000)
+        return True
+
+    def copy_file_path(self) -> None:
+        cur = self.navigator.current_file
+        if cur is not None:
+            QApplication.clipboard().setText(str(cur))
+            self.status.showMessage(f"📋 Copied path: {cur}", 3000)
+
+    def rename_current_file(self, new_name: Optional[str] = None) -> Optional[Path]:
+        """Rename the current file on disk (asks for the name when not given)."""
+        cur = self.navigator.current_file
+        if cur is None:
+            return None
+        if new_name is None:
+            dlg = QInputDialog(self)
+            dlg.setWindowTitle("Rename")
+            dlg.setLabelText("New file name:")
+            dlg.setTextValue(cur.name)
+            dlg.resize(420, dlg.sizeHint().height())
+            # Pre-select the name without the extension, like file managers do.
+            QTimer.singleShot(0, dlg, lambda: dlg.findChild(QLineEdit).setSelection(0, len(cur.stem)))
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            new_name = dlg.textValue()
+        new_name = new_name.strip()
+        if not new_name or new_name == cur.name:
+            return None
+        if "/" in new_name or "\\" in new_name or new_name in (".", ".."):
+            QMessageBox.warning(self, "Rename", "A file name can't contain '/' or '\\'.")
+            return None
+        target = cur.with_name(new_name)
+        if target.exists():
+            QMessageBox.warning(self, "Rename", f"'{new_name}' already exists in this folder.")
+            return None
+
+        was_video = self.current_is_video
+        if was_video:
+            self.video_view.stop()  # Windows can't rename a file that's open for playback
+        self._ignore_watch_until = time.monotonic() + 1.5
+        try:
+            cur.rename(target)
+        except OSError as exc:
+            QMessageBox.warning(self, "Rename", f"Could not rename {cur.name}:\n{exc.strerror or exc}")
+            if was_video:
+                self._display_current_file()
+            return None
+        self.cache.invalidate(cur)
+        if self.document is not None:
+            self.document.path = target  # unsaved edits stay attached to the renamed file
+        self.navigator.load_target(target)
+        if was_video:
+            self._display_current_file()
+        else:
+            self._watch_current()
+            self._update_ui_state()
+        self.status.showMessage(f"✏ Renamed to {target.name}", 3000)
+        return target
+
+    def show_in_file_manager(self) -> None:
+        """Open the folder with the current file selected (falls back to just opening the folder)."""
+        cur = self.navigator.current_file
+        if cur is None:
+            return
+        if sys.platform.startswith("win"):
+            QProcess.startDetached("explorer", [f"/select,{cur}"])
+            return
+        if sys.platform == "darwin":
+            QProcess.startDetached("open", ["-R", str(cur)])
+            return
+        # Linux: the freedesktop FileManager1 D-Bus API (Thunar, Nautilus, Dolphin, Nemo...).
+        uri = QUrl.fromLocalFile(str(cur)).toString(QUrl.ComponentFormattingOption.FullyEncoded).replace("'", "%27")
+        proc = QProcess(self)
+
+        def done(code: int, _status) -> None:
+            if code != 0:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(cur.parent)))
+            proc.deleteLater()
+
+        proc.finished.connect(done)
+        proc.errorOccurred.connect(lambda _e: done(1, None))
+        proc.start(
+            "gdbus",
+            ["call", "--session", "--dest", "org.freedesktop.FileManager1",
+             "--object-path", "/org/freedesktop/FileManager1",
+             "--method", "org.freedesktop.FileManager1.ShowItems", f"['{uri}']", ""],
+        )
+
+    def open_in_default_app(self) -> None:
+        cur = self.navigator.current_file
+        if cur is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(cur)))
+
+    # ------------------------------------------------------------------
+    # Auto-reload when the file or folder changes on disk
+    # ------------------------------------------------------------------
+
+    def _watch_current(self) -> None:
+        cur = self.navigator.current_file
+        old = self.watcher.files() + self.watcher.directories()
+        if old:
+            self.watcher.removePaths(old)
+        if cur is not None and cur.exists():
+            self.watcher.addPath(str(cur))
+            self.watcher.addPath(str(cur.parent))
+
+    def _on_watched_file_changed(self, _path: str) -> None:
+        self._file_reload_timer.start()
+
+    def _on_watched_dir_changed(self, _path: str) -> None:
+        self._dir_rescan_timer.start()
+
+    def _reload_changed_file(self) -> None:
+        cur = self.navigator.current_file
+        if cur is None or self.current_is_video:
+            return
+        if time.monotonic() < self._ignore_watch_until:
+            self._watch_current()  # editors/our saves replace the file, which drops the watch
+            return
+        if not cur.exists():
+            return  # deleted or moved: the folder rescan handles it
+        if self.document is not None and self.document.modified:
+            self.status.showMessage(f"⚠ {cur.name} changed on disk — your unsaved edits were kept.", 6000)
+            self._watch_current()
+            return
+        self.cache.invalidate(cur)
+        self._display_current_file()
+        self.status.showMessage(f"↻ Reloaded {cur.name} (changed on disk)", 3000)
+
+    def _rescan_changed_folder(self) -> None:
+        folder, cur = self.navigator.folder, self.navigator.current_file
+        if folder is None or time.monotonic() < self._ignore_watch_until:
+            return
+        before = list(self.navigator.files)
+        if cur is not None and cur.exists():
+            self.navigator.load_target(cur)
+        else:
+            # The shown file vanished (deleted/moved elsewhere): stay at the same position.
+            index = self.navigator.index
+            if self.navigator.load_target(folder) is not None:
+                self.navigator.index = max(0, min(index, self.navigator.count - 1))
+            self._display_current_file()
+        if self.navigator.files != before:
+            self._update_ui_state()
+            self.status.showMessage(f"Folder changed — {self.navigator.count} files", 2500)
 
     # ------------------------------------------------------------------
     # Slideshow & Fullscreen
@@ -1196,55 +1416,65 @@ class HakuViewWindow(QMainWindow):
         has_file = self.navigator.current_file is not None
         modified = bool(is_img and self.document.modified)
 
-        def add(text: str, slot, enabled: bool = True) -> QAction:
-            act = menu.addAction(text, slot)
+        def add(text: str, slot, enabled: bool = True, into: Optional[QMenu] = None) -> QAction:
+            act = (into or menu).addAction(text, slot)
             act.setEnabled(enabled)
             return act
 
+        # Top level: the everyday actions. Less frequent ones live in File / Image / View / Help.
         add("📂 Open File... (O)", self.open_file_dialog)
         add("💾 Save (Ctrl+S)", self.save_current, modified)
         add("💾 Save As... (Ctrl+Shift+S)", self.save_as_dialog, is_img)
-        menu.addSeparator()
-
-        add("🗜 Compress Variant (K)", self.compress_current_variant, is_img)
-        presets = menu.addMenu("🎯 Compression Preset")
-        for label, mode_id in COMPRESSION_MODES:
-            presets.addAction(self._compress_actions[mode_id])
+        file_menu = menu.addMenu("📁 File")
+        add("📋 Copy Image (Ctrl+C)", self.copy_image_to_clipboard, is_img or is_vid, file_menu)
+        add("Copy File Path (Ctrl+Shift+C)", self.copy_file_path, has_file, file_menu)
+        add("✏ Rename... (F2)", self.rename_current_file, has_file, file_menu)
+        add("Show in File Manager", self.show_in_file_manager, has_file, file_menu)
+        add("Open in Default App", self.open_in_default_app, has_file, file_menu)
         menu.addSeparator()
 
         add("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action, is_img or is_vid)
-        add("🎨 Color Scaling / Brightness & Contrast (B)", self.toggle_color_bar, has_file)
-        add("↺ Rotate Left 90° (L)", self.rotate_left, is_img)
-        add("↻ Rotate Right 90° (R)", self.rotate_right, is_img)
-        add("⇆ Flip Horizontal (H)", self.flip_horizontal, is_img)
-        add("⇅ Flip Vertical (V)", self.flip_vertical, is_img)
-        add("↶ Undo Edit (Ctrl+Z)", self.undo_edit, modified)
+        add("🎨 Brightness && Contrast (B)", self.toggle_color_bar, has_file)
+        image_menu = menu.addMenu("🖼 Image")
+        image_menu.setEnabled(is_img)
+        add("↺ Rotate Left 90° (L)", self.rotate_left, is_img, image_menu)
+        add("↻ Rotate Right 90° (R)", self.rotate_right, is_img, image_menu)
+        add("⇆ Flip Horizontal (H)", self.flip_horizontal, is_img, image_menu)
+        add("⇅ Flip Vertical (V)", self.flip_vertical, is_img, image_menu)
+        add("↶ Undo Edit (Ctrl+Z)", self.undo_edit, modified, image_menu)
+        image_menu.addSeparator()
+        add("🗜 Compress Variant (K)", self.compress_current_variant, is_img, image_menu)
+        presets = image_menu.addMenu("Compression Preset")
+        for label, mode_id in COMPRESSION_MODES:
+            presets.addAction(self._compress_actions[mode_id])
         menu.addSeparator()
 
         add("🎲 Random File (Ctrl+M)", self.random_item, self.navigator.count > 1)
         slide = add("▶ Slideshow (W or F5)", self.toggle_slideshow)
         slide.setCheckable(True)
         slide.setChecked(self.slideshow_active)
-        add("⊞ Fit to Window (0)", self.canvas.zoom_fit, is_img)
-        add("1:1 Actual Size (1)", self.canvas.zoom_actual, is_img)
-        add("⛶ Fullscreen (F)", self.toggle_fullscreen)
-        add("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog, has_file)
-        menu.addSeparator()
-        sort_menu = menu.addMenu("Sort Files By")
+        view_menu = menu.addMenu("👁 View")
+        add("⊞ Fit to Window (0)", self.canvas.zoom_fit, is_img, view_menu)
+        add("1:1 Actual Size (1)", self.canvas.zoom_actual, is_img, view_menu)
+        add("⛶ Fullscreen (F)", self.toggle_fullscreen, True, view_menu)
+        sort_menu = view_menu.addMenu("Sort Files By")
         sort_group = QActionGroup(sort_menu)
         for mode, label in SORT_MODES.items():
             act = sort_menu.addAction(label, lambda m=mode: self.set_sort_mode(m))
             act.setCheckable(True)
             act.setChecked(self.navigator.sort_mode == mode)
             sort_group.addAction(act)
+        add("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog, has_file)
         menu.addSeparator()
+
         add("⚙ Settings... (Ctrl+,)", self.show_settings_dialog)
-        add("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog)
-        add("🔄 Check for Updates...", self.check_for_updates, not self.update_checker.running)
-        auto = add("Check for Updates on Startup", self._toggle_startup_update_check)
+        help_menu = menu.addMenu("❓ Help")
+        add("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog, True, help_menu)
+        add("🔄 Check for Updates...", self.check_for_updates, not self.update_checker.running, help_menu)
+        auto = add("Check for Updates on Startup", self._toggle_startup_update_check, True, help_menu)
         auto.setCheckable(True)
         auto.setChecked(self.update_settings.check_on_startup)
-        add("🦉 About HakuView...", self.show_about_dialog)
+        add("🦉 About HakuView...", self.show_about_dialog, True, help_menu)
 
         if exec_menu:
             menu.exec(menu_position_under(menu, anchor_widget or self.btn_more, fallback=self))
