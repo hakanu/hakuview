@@ -41,6 +41,8 @@ hakuview --update
   Click **Compress** or press `K` to save an optimized variant in the same directory (e.g. `image_lossless.png` or `image_lossless.webp`) with zero loss in quality.
 - 🎬 **Videos & Slideshows in the Same Window (`W` / `F5`)**  
   Plays MP4, MKV, WebM, MOV, and animated GIFs without switching apps. During slideshows, videos play to completion before auto-advancing.
+- ✂️ **Lossless Video Trimming (`[` / `]` or `I` / `O` + `T`)**  
+  Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, then press `T` or click **✂ Trim**. Uses instant FFmpeg stream copy with zero re-encoding and zero quality loss.
 
 ---
 
@@ -56,12 +58,14 @@ hakuview --update
 | `K` | **1-Click Compress** & save variant |
 | `Ctrl + Z` | Undo last edit |
 | `Ctrl + S` | Save changes |
-| `W` or `F5` | Toggle Slideshow (`[` and `]` change speed) |
+| `[ / I` and `] / O` | **Mark Video In / Out points** for trimming |
+| `T` | **Export Trimmed Video** (Instant lossless stream copy) |
+| `W` or `F5` | Toggle Slideshow (`[` and `]` change speed during photo view) |
 | `F` or `Double-Click` | Fullscreen |
 | `+` / `-` or `Wheel` | Zoom (centered at mouse) |
 | `0` / `1` | Fit to window / 100% actual size |
 | `Click Video` or `Space` | Play / Pause (stop) video |
-| `Ctrl + W` / `Esc` | Close window / Exit fullscreen |
+| `Ctrl + W` / `Esc` | Close window / Exit fullscreen / Clear trim |
 
 ---
 

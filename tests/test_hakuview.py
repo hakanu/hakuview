@@ -269,3 +269,78 @@ def test_combobox_popup_dark_theme(tmp_path: Path, qtbot) -> None:
     bg_color = view.palette().base().color()
     # Lightness is 0-255; dark background should be < 100, not 255 (white)
     assert bg_color.lightness() < 100
+
+
+def test_video_trim_markers_and_ui(qtbot) -> None:
+    from hakuview.video_view import VideoPlayerWidget
+
+    player_widget = VideoPlayerWidget()
+    qtbot.addWidget(player_widget)
+
+    assert not player_widget.has_trim_points()
+    assert not player_widget.btn_trim.isEnabled()
+
+    # Simulate video duration of 10 seconds (10000ms)
+    player_widget.seek_slider.setRange(0, 10000)
+
+    # Set In-point at 2000ms
+    player_widget.set_trim_in(2000)
+    assert player_widget.has_trim_points()
+    assert player_widget.trim_in_ms == 2000
+    assert player_widget.seek_slider.trim_in_pos == 2000
+    assert "[00:02" in player_widget.btn_set_in.text()
+
+    # Set Out-point at 7500ms
+    player_widget.set_trim_out(7500)
+    assert player_widget.trim_out_ms == 7500
+    assert player_widget.seek_slider.trim_out_pos == 7500
+    assert "00:07]" in player_widget.btn_set_out.text()
+    assert player_widget.btn_trim.isEnabled()
+    assert "00:05" in player_widget.btn_trim.text()
+
+    # Clear trim points
+    player_widget.clear_trim()
+    assert not player_widget.has_trim_points()
+    assert player_widget.trim_in_ms is None
+    assert player_widget.trim_out_ms is None
+    assert player_widget.seek_slider.trim_in_pos is None
+    assert player_widget.seek_slider.trim_out_pos is None
+    assert not player_widget.btn_trim.isEnabled()
+
+
+def test_video_trim_worker(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    from hakuview.video_view import _TrimWorker
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available for trim worker test")
+
+    # Generate a lightweight 3s synthetic test video
+    src_vid = tmp_path / "sample_input.mp4"
+    dest_vid = tmp_path / "sample_input_trim.mp4"
+    res = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=3:size=160x120:rate=15",
+            str(src_vid),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert src_vid.exists()
+
+    completed_paths = []
+    worker = _TrimWorker(src_vid, dest_vid, start_ms=1000, end_ms=2000)
+    worker.finished.connect(completed_paths.append)
+    worker.run()
+
+    assert len(completed_paths) == 1
+    assert completed_paths[0] == dest_vid
+    assert dest_vid.exists()
+    assert dest_vid.stat().st_size > 500

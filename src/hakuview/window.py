@@ -50,7 +50,7 @@ from .image_ops import (
     save_qimage_atomic,
 )
 from .installer import ensure_hakuview_ico
-from .video_view import VideoPlayerWidget
+from .video_view import VideoPlayerWidget, _format_ms
 
 
 def _human_size(num_bytes: int) -> str:
@@ -279,6 +279,7 @@ class HakuViewWindow(QMainWindow):
         self.video_view.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
         self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
+        self.video_view.trimCompleted.connect(self._on_video_trimmed)
 
         # Compact Top Toolbar
         self.toolbar = QToolBar("Main Toolbar", self)
@@ -504,6 +505,27 @@ class HakuViewWindow(QMainWindow):
             event.accept()
             return
 
+        # Video Trimming shortcuts
+        if self.current_is_video:
+            if key in (Qt.Key.Key_BracketLeft, Qt.Key.Key_I):
+                self.video_view.set_trim_in()
+                in_ms = self.video_view.trim_in_ms or 0
+                self.status.showMessage(f"✂ Mark In: {_format_ms(in_ms)}", 3000)
+                event.accept()
+                return
+
+            if key in (Qt.Key.Key_BracketRight, Qt.Key.Key_O):
+                self.video_view.set_trim_out()
+                out_ms = self.video_view.trim_out_ms or 0
+                self.status.showMessage(f"✂ Mark Out: {_format_ms(out_ms)}", 3000)
+                event.accept()
+                return
+
+            if key == Qt.Key.Key_T:
+                self.video_view.execute_trim()
+                event.accept()
+                return
+
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self.current_is_video and not self.canvas.selection.isNull():
                 self.apply_crop()
@@ -513,7 +535,10 @@ class HakuViewWindow(QMainWindow):
             return
 
         if key == Qt.Key.Key_Escape:
-            if not self.current_is_video and not self.canvas.selection.isNull():
+            if self.current_is_video and self.video_view.has_trim_points():
+                self.video_view.clear_trim()
+                self.status.showMessage("Trim markers cleared.", 2000)
+            elif not self.current_is_video and not self.canvas.selection.isNull():
                 self.canvas.clear_selection()
             elif self.slideshow_active:
                 self.set_slideshow(False)
@@ -710,8 +735,14 @@ class HakuViewWindow(QMainWindow):
         self._update_ui_state()
 
     def trigger_crop_action(self) -> bool:
-        """Toggle border crop handles with C, or apply crop if borders/selection were adjusted."""
-        if self.document is None or self.current_is_video:
+        """Toggle border crop handles with C (for image), or export trim (for video)."""
+        if self.current_is_video:
+            if not self.video_view.has_trim_points():
+                self.status.showMessage("Mark In ([ or I) and Out (] or O) points first, then press T to trim.", 4000)
+                return False
+            self.video_view.execute_trim()
+            return True
+        if self.document is None:
             return False
         sel = self.canvas.selection
         img_rect = self.document.current.rect()
@@ -955,6 +986,12 @@ class HakuViewWindow(QMainWindow):
         self._display_current_file()
         self.status.showMessage(f"Transcoded to {new_mp4_path.name} and playing full video!", 5000)
 
+    def _on_video_trimmed(self, new_clip_path: Path) -> None:
+        if self.navigator.folder and new_clip_path.parent == self.navigator.folder:
+            self.navigator.scan(self.navigator.folder, self.navigator.current_file)
+            self._update_ui_state()
+        self.status.showMessage(f"✂ Trimmed video saved: {new_clip_path.name} (Press → to view)", 8000)
+
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
             self.showNormal()
@@ -1005,13 +1042,14 @@ class HakuViewWindow(QMainWindow):
             self.lbl_zoom.setText("")
 
     def _on_selection_changed(self, rect: QRect) -> None:
-        is_img = not self.current_is_video and self.document is not None
-        self.btn_crop.setEnabled(is_img)
+        is_ready = (not self.current_is_video and self.document is not None) or self.current_is_video
+        self.btn_crop.setEnabled(is_ready)
 
     def _update_ui_state(self) -> None:
         cur = self.navigator.current_file
         has_file = cur is not None
         is_img = has_file and not self.current_is_video and self.document is not None
+        is_vid = has_file and self.current_is_video
 
         self.btn_prev.setEnabled(self.navigator.count > 1)
         self.btn_next.setEnabled(self.navigator.count > 1)
@@ -1020,7 +1058,13 @@ class HakuViewWindow(QMainWindow):
         self.btn_rot_left.setEnabled(is_img)
         self.btn_rot_right.setEnabled(is_img)
         self.btn_flip_h.setEnabled(is_img)
-        self.btn_crop.setEnabled(is_img)
+        self.btn_crop.setEnabled(is_img or is_vid)
+        if is_vid:
+            self.btn_crop.setText("✂ Trim Video (T)")
+            self.btn_crop.setToolTip("Export trimmed video clip via lossless stream copy (Shortcuts: [ / ] or I / O, then T)")
+        else:
+            self.btn_crop.setText("✂ Crop (C)")
+            self.btn_crop.setToolTip("Press C to show border crop handles (or drag a box), then press C or Enter to apply crop")
         self.btn_compress.setEnabled(is_img)
         self.combo_compress.setEnabled(is_img)
         self.btn_fit.setEnabled(is_img)
@@ -1136,9 +1180,9 @@ class HakuViewWindow(QMainWindow):
 
         menu.addSeparator()
 
-        # Image operations
-        act_crop = menu.addAction("✂ Border Crop (C)", self.trigger_crop_action)
-        act_crop.setEnabled(is_img)
+        # Image & Video operations
+        act_crop = menu.addAction("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action)
+        act_crop.setEnabled(is_img or is_vid)
         act_rotl = menu.addAction("↺ Rotate Left 90° (L)", self.rotate_left)
         act_rotl.setEnabled(is_img)
         act_rotr = menu.addAction("↻ Rotate Right 90° (R)", self.rotate_right)
@@ -1196,7 +1240,9 @@ class HakuViewWindow(QMainWindow):
             "<tr><td><b>+ / - or Wheel</b></td><td>Zoom (centered at mouse)</td></tr>"
             "<tr><td><b>0 / 1</b></td><td>Fit to window / 100% 1:1 size</td></tr>"
             "<tr><td><b>Space or Click</b></td><td>Play / Pause video (or pan image)</td></tr>"
-            "<tr><td><b>Ctrl + W / Esc</b></td><td>Close window / Exit fullscreen</td></tr>"
+            "<tr><td><b>[ / I and ] / O</b></td><td>Mark Video In-point / Out-point for Trim</td></tr>"
+            "<tr><td><b>T</b></td><td>Export Trimmed Video Clip (Lossless FFmpeg)</td></tr>"
+            "<tr><td><b>Ctrl + W / Esc</b></td><td>Close window / Exit fullscreen / Clear trim</td></tr>"
             "</table>"
         )
         box = QMessageBox(self)
