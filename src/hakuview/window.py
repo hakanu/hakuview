@@ -1150,12 +1150,42 @@ class HakuViewWindow(QMainWindow):
         box.exec()
 
     def show_about_dialog(self) -> None:
-        QMessageBox.about(
-            self,
-            f"About {__app_name__}",
-            f"<b>{__app_name__} v{__version__}</b><br><br>"
-            "Ultra-fast, lightweight IrfanView-inspired image & video viewer for Ubuntu & Windows.<br><br>"
-            "Features: Instant middle-of-folder cycling, border crop, rotate, 1-click compression, "
-            "hardware-accelerated video playback, and non-blocking slideshows.<br><br>"
-            "MIT License",
+        full_license_text = (
+            "HakuView — MIT License\n\n"
+            "Copyright (c) 2026 HakuView\n\n"
+            "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
+            "of this software and associated documentation files (the \"Software\"), to deal\n"
+            "in the Software without restriction, including without limitation the rights\n"
+            "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
+            "copies of the Software, and to permit persons to whom the Software is\n"
+            "furnished to do so, subject to the following conditions:\n\n"
+            "The above copyright notice and this permission notice shall be included in all\n"
+            "copies or substantial portions of the Software.\n\n"
+            "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
+            "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+            "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+            "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+            "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
+            "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
+            "SOFTWARE.\n\n"
+            "--------------------------------------------------\n"
+            "Third-Party Open-Source Components & Licenses:\n"
+            "• Qt6 / PySide6: GNU Lesser General Public License v3 (LGPLv3)\n"
+            "• Pillow (PIL): Historical Permission Notice and Disclaimer (HPND / MIT-equivalent)\n"
+            "• FFmpeg (via Qt Multimedia): LGPL v2.1+ / GPL\n"
         )
+
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {__app_name__}")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setIconPixmap(QIcon(str(ensure_hakuview_ico())).pixmap(64, 64))
+        box.setText(
+            f"<h3>🦉 {__app_name__} <span style='font-size: 13px; color: #38bdf8;'>v{__version__}</span></h3>"
+            "<p>Fast, lightweight IrfanView-inspired image & video viewer for Ubuntu & Windows.</p>"
+            "<p><b>Features:</b> Instant middle-of-folder cycling, border crop, rotate, "
+            "1-click compression, hardware-accelerated video playback, and slideshows.</p>"
+            "<p>Released under the <b>MIT License</b>.<br>"
+            "Source code: <a href='https://github.com/hakanu/hakuview' style='color: #38bdf8;'>github.com/hakanu/hakuview</a></p>"
+        )
+        box.setDetailedText(full_license_text)
+        box.exec()
