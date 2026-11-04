@@ -374,3 +374,38 @@ def test_timeline_arbitrary_click_moves_position(qtbot) -> None:
     # Slider value must immediately jump to ~75,000, not stay at 0 or step by a small page
     assert slider.value() > 70000
     assert slider.value() < 80000
+
+
+def test_media_info_dialog_and_extraction(tmp_path: Path, qtbot) -> None:
+    from hakuview.info_dialog import MediaInfoDialog, extract_media_info
+    from PySide6.QtWidgets import QApplication
+
+    img_path = tmp_path / "test_photo.png"
+    _create_sample_image(img_path, width=200, height=100)
+
+    info = extract_media_info(img_path)
+    assert info["file_name"] == "test_photo.png"
+    assert info["width"] == 200
+    assert info["height"] == 100
+    assert info["is_video"] is False
+    assert "compression_ratio" in info
+    assert "bits_per_pixel" in info
+
+    # Dialog instantiation and clipboard report test
+    dlg = MediaInfoDialog(img_path)
+    qtbot.addWidget(dlg)
+    dlg.show()
+
+    assert dlg.btn_copy is not None
+    dlg._copy_to_clipboard()
+    copied_text = QApplication.clipboard().text()
+    assert "# HakuView Media Information" in copied_text
+    assert "test_photo.png" in copied_text
+    assert "200 × 100" in copied_text
+
+    # Window integration test
+    win = HakuViewWindow(initial_path=img_path)
+    qtbot.addWidget(win)
+    win.show()
+    assert hasattr(win, "btn_info")
+    assert win.btn_info.isEnabled()

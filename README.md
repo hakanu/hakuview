@@ -47,6 +47,8 @@ hakuview --update
   Plays MP4, MKV, WebM, MOV, and animated GIFs without switching apps. During slideshows, videos play to completion before auto-advancing.
 - ✂️ **Lossless Video Trimming (`[` / `]` or `I` / `O` + `T`)**  
   Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, then press `T` or click **✂ Trim**. Uses instant FFmpeg stream copy with zero re-encoding and zero quality loss.
+- ℹ️ **Geeky Media Inspector (`I` / `Ctrl+I`)**  
+  Opens a detailed technical card showing true compression ratios, video/audio bitrates, bits-per-pixel (BPP) efficiency, container profiles, and camera EXIF data with 1-click clipboard export.
 
 ---
 
@@ -60,6 +62,7 @@ hakuview --update
 | `R` / `L` | Rotate 90° Right / Left |
 | `H` / `V` | Flip Horizontal / Vertical |
 | `K` | **1-Click Compress** & save variant |
+| `I` or `Ctrl + I` | **Media Inspector / Info Card** (Bitrate, Compression ratio, Codecs, EXIF) |
 | `Ctrl + Z` | Undo last edit |
 | `Ctrl + S` | Save changes |
 | `[ / I` and `] / O` | **Mark Video In / Out points** for trimming |

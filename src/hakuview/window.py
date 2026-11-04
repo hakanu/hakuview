@@ -50,6 +50,7 @@ from .image_ops import (
     save_qimage_atomic,
 )
 from .installer import ensure_hakuview_ico
+from .info_dialog import MediaInfoDialog
 from .video_view import VideoPlayerWidget, _format_ms
 
 
@@ -280,6 +281,7 @@ class HakuViewWindow(QMainWindow):
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
         self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
         self.video_view.trimCompleted.connect(self._on_video_trimmed)
+        self.video_view.infoRequested.connect(self.show_media_info_dialog)
 
         # Compact Top Toolbar
         self.toolbar = QToolBar("Main Toolbar", self)
@@ -355,6 +357,12 @@ class HakuViewWindow(QMainWindow):
         self.btn_fit = self._add_tb_button("⊞ Fit (0)", self.canvas.zoom_fit, "Fit image to window")
         self.btn_actual = self._add_tb_button("1:1 (1)", self.canvas.zoom_actual, "Actual pixel size (100%)")
         self.btn_fullscreen = self._add_tb_button("⛶ Fullscreen (F)", self.toggle_fullscreen, "Toggle Fullscreen (F or F11)")
+        self.btn_info = self._add_tb_button(
+            "ℹ Info (I)",
+            self.show_media_info_dialog,
+            "Media Inspector: View compression ratio, bitrate, codec, EXIF & tech specs (Shortcut: I or Ctrl+I)",
+        )
+        self.btn_info.setEnabled(False)
 
         # Spacer & 3-dots More Options button
         spacer = QWidget(self)
@@ -411,7 +419,8 @@ class HakuViewWindow(QMainWindow):
         self._add_action("Undo", "Ctrl+Z", self.undo_edit)
         self._add_action("RandomFile", "Ctrl+M", self.random_item)
         self._add_action("DeleteFile", "Delete", self.delete_current_file)
-        self._add_action("InfoOverlay", "I", self.toggle_info_overlay)
+        self._add_action("MediaInfoCtrlI", "Ctrl+I", self.show_media_info_dialog)
+        self._add_action("InfoHUD", "Shift+I", self.toggle_info_overlay)
 
         # Image transformations (IrfanView keybindings)
         self._add_action("RotateRight", "R", self.rotate_right)
@@ -504,6 +513,13 @@ class HakuViewWindow(QMainWindow):
             self.video_view.toggle_mute()
             event.accept()
             return
+
+        # Media Inspector Card (Ctrl+I anytime, or I for images)
+        if key == Qt.Key.Key_I:
+            if (mods & Qt.KeyboardModifier.ControlModifier) or not self.current_is_video:
+                self.show_media_info_dialog()
+                event.accept()
+                return
 
         # Video Trimming shortcuts
         if self.current_is_video:
@@ -1006,6 +1022,15 @@ class HakuViewWindow(QMainWindow):
         self._info_visible = not self._info_visible
         self.canvas.set_info_overlay(self._info_visible, self._build_info_text() if self._info_visible else "")
 
+    def show_media_info_dialog(self) -> None:
+        """Open the geeky Media Inspector dialog showing bitrate, compression, and EXIF."""
+        cur = self.navigator.current_file
+        if cur is None or not cur.exists():
+            self.status.showMessage("No file loaded to inspect.", 3000)
+            return
+        dlg = MediaInfoDialog(cur, self)
+        dlg.exec()
+
     def _build_info_text(self) -> str:
         cur = self.navigator.current_file
         if cur is None:
@@ -1069,6 +1094,7 @@ class HakuViewWindow(QMainWindow):
         self.combo_compress.setEnabled(is_img)
         self.btn_fit.setEnabled(is_img)
         self.btn_actual.setEnabled(is_img)
+        self.btn_info.setEnabled(has_file)
 
         modified = bool(is_img and self.document and self.document.modified)
         self.btn_undo.setEnabled(modified)
@@ -1207,7 +1233,7 @@ class HakuViewWindow(QMainWindow):
         act_act = menu.addAction("1:1 Actual Size (1)", self.canvas.zoom_actual)
         act_act.setEnabled(is_img)
         act_fs = menu.addAction("⛶ Fullscreen (F)", self.toggle_fullscreen)
-        act_info = menu.addAction("ℹ File Info HUD (I)", self.toggle_info_overlay)
+        act_info = menu.addAction("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog)
         act_info.setEnabled(has_file)
 
         menu.addSeparator()
@@ -1242,6 +1268,7 @@ class HakuViewWindow(QMainWindow):
             "<tr><td><b>Space or Click</b></td><td>Play / Pause video (or pan image)</td></tr>"
             "<tr><td><b>[ / I and ] / O</b></td><td>Mark Video In-point / Out-point for Trim</td></tr>"
             "<tr><td><b>T</b></td><td>Export Trimmed Video Clip (Lossless FFmpeg)</td></tr>"
+            "<tr><td><b>I / Ctrl + I</b></td><td>Media Inspector / Geek Info Card (Bitrate, Compression, Codec, EXIF)</td></tr>"
             "<tr><td><b>Ctrl + W / Esc</b></td><td>Close window / Exit fullscreen / Clear trim</td></tr>"
             "</table>"
         )

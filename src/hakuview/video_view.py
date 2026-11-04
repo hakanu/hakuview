@@ -309,6 +309,7 @@ class VideoPlayerWidget(QWidget):
     doubleClicked = Signal()
     transcodeCompleted = Signal(Path)
     trimCompleted = Signal(Path)
+    infoRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -483,6 +484,13 @@ class VideoPlayerWidget(QWidget):
         self.speed_combo.setCurrentIndex(1)
         self.speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         bar_layout.addWidget(self.speed_combo)
+
+        self.btn_info = QPushButton("ℹ")
+        self.btn_info.setToolTip("Media Inspector: Bitrate, Codec, Compression & Tech Specs (Ctrl+I)")
+        self.btn_info.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_info.setFixedWidth(28)
+        self.btn_info.clicked.connect(self.infoRequested.emit)
+        bar_layout.addWidget(self.btn_info)
 
         # AV1 compatibility banner
         self.banner = QWidget(self)
