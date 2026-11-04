@@ -187,7 +187,30 @@ class _TrimWorker(QObject):
             self.failed.emit(str(exc))
 
 
-class TrimSeekSlider(QSlider):
+class ClickableSlider(QSlider):
+    """QSlider that jumps directly to the clicked mouse position on arbitrary points."""
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            style = self.style()
+            hr = style.subControlRect(
+                QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
+            )
+            half_hw = hr.width() // 2
+            span = max(1, self.width() - hr.width())
+            x = int(event.position().x())
+            val = style.sliderValueFromPosition(
+                self.minimum(), self.maximum(), x - half_hw, span, self.invertedAppearance()
+            )
+            clamped = max(self.minimum(), min(self.maximum(), val))
+            self.setValue(clamped)
+            self.sliderMoved.emit(clamped)
+        super().mousePressEvent(event)
+
+
+class TrimSeekSlider(ClickableSlider):
     """QSlider that renders In/Out trim markers and highlights the selected cut range."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -445,7 +468,7 @@ class VideoPlayerWidget(QWidget):
         self.mute_btn.clicked.connect(self.toggle_mute)
         bar_layout.addWidget(self.mute_btn)
 
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider = ClickableSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
@@ -710,6 +733,9 @@ class VideoPlayerWidget(QWidget):
 
     def _on_slider_pressed(self) -> None:
         self._slider_dragging = True
+        self.player.setPosition(self.seek_slider.value())
+        dur = self.player.duration()
+        self.time_label.setText(f"{_format_ms(self.seek_slider.value())} / {_format_ms(dur)}")
 
     def _on_slider_released(self) -> None:
         self._slider_dragging = False

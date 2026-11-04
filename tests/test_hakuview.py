@@ -344,3 +344,33 @@ def test_video_trim_worker(tmp_path: Path) -> None:
     assert completed_paths[0] == dest_vid
     assert dest_vid.exists()
     assert dest_vid.stat().st_size > 500
+
+
+def test_timeline_arbitrary_click_moves_position(qtbot) -> None:
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+    from hakuview.video_view import VideoPlayerWidget
+
+    player_widget = VideoPlayerWidget()
+    qtbot.addWidget(player_widget)
+    player_widget.show()
+
+    slider = player_widget.seek_slider
+    slider.resize(400, 24)
+    slider.setRange(0, 100000)  # 100 seconds
+    slider.setValue(0)
+
+    # Click at 75% along the track (~300px)
+    click_pos = QPointF(300, 12)
+    evt = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        click_pos,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    slider.mousePressEvent(evt)
+
+    # Slider value must immediately jump to ~75,000, not stay at 0 or step by a small page
+    assert slider.value() > 70000
+    assert slider.value() < 80000
