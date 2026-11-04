@@ -138,12 +138,17 @@ def _qimage_to_pil(image: QImage) -> Image.Image:
     return pil_img
 
 
-def color_lut(brightness: int, contrast: int) -> List[int]:
-    """256-entry lookup table for brightness (-100..100) and contrast (-100..100), 0 = neutral."""
+def color_lut_params(brightness: int, contrast: int) -> Tuple[float, float]:
+    """(contrast factor, brightness offset) for: out = clip(round(factor * (x - 128 + offset) + 128))."""
     c = max(-99, min(99, int(contrast))) * 2.55
     factor = (259.0 * (c + 255.0)) / (255.0 * (259.0 - c))
-    b_offset = float(brightness) * 1.28
-    return [max(0, min(255, int(round(factor * (x - 128.0 + b_offset) + 128.0)))) for x in range(256)]
+    return factor, float(brightness) * 1.28
+
+
+def color_lut(brightness: int, contrast: int) -> List[int]:
+    """256-entry lookup table for brightness (-100..100) and contrast (-100..100), 0 = neutral."""
+    factor, offset = color_lut_params(brightness, contrast)
+    return [max(0, min(255, int(round(factor * (x - 128.0 + offset) + 128.0)))) for x in range(256)]
 
 
 _IDENTITY_LUT = list(range(256))

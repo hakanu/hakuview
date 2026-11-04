@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 
-from .image_ops import apply_color_lut, color_lut
+from .image_ops import _next_variant_path, apply_color_lut, color_lut, color_lut_params
 
 
 def _format_ms(ms: int) -> str:
@@ -190,6 +190,37 @@ class _TrimWorker(_FfmpegJob):
         ]
         # A near-empty stream-copy output means the container rejected the cut.
         return [(stream_copy, 1000), (reencode, 0)]
+
+
+class _ColorExportWorker(_FfmpegJob):
+    """Re-encodes a video with the same brightness/contrast LUT the live preview uses."""
+
+    label = "Color export"
+
+    def __init__(self, src_path: Path, dest_path: Path, brightness: int, contrast: int) -> None:
+        super().__init__(src_path, dest_path)
+        self.brightness = brightness
+        self.contrast = contrast
+
+    def lut_expression(self) -> str:
+        """ffmpeg lutrgb expression equal to image_ops.color_lut() for these settings."""
+        factor, offset = color_lut_params(self.brightness, self.contrast)
+        # Quoted so the commas inside clip() aren't read as filter-graph separators.
+        return f"'clip(round({factor:.6f}*(val-128+{offset:.4f})+128),0,255)'"
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        expr = self.lut_expression()
+        encode = [
+            ffmpeg, "-y", "-i", str(self.src_path),
+            "-vf", f"lutrgb=r={expr}:g={expr}:b={expr},format=yuv420p",
+            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+            "-movflags", "+faststart",
+        ]
+        # Copying the audio is lossless, but MP4 rejects some codecs (e.g. Vorbis); then use AAC.
+        return [
+            (encode + ["-c:a", "copy", str(self.dest_path)], 0),
+            (encode + ["-c:a", "aac", "-b:a", "192k", str(self.dest_path)], 0),
+        ]
 
 
 class ClickableSlider(QSlider):
@@ -401,6 +432,8 @@ class VideoPlayerWidget(QWidget):
     doubleClicked = Signal()
     transcodeCompleted = Signal(Path)
     trimCompleted = Signal(Path)
+    colorExportCompleted = Signal(Path)
+    colorExportFailed = Signal(str)
     infoRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -704,11 +737,7 @@ class VideoPlayerWidget(QWidget):
         if end_ms <= start_ms:
             return
 
-        dest_path = self._current_path.parent / f"{self._current_path.stem}_trim{self._current_path.suffix}"
-        counter = 2
-        while dest_path.exists():
-            dest_path = self._current_path.parent / f"{self._current_path.stem}_trim_{counter}{self._current_path.suffix}"
-            counter += 1
+        dest_path = _next_variant_path(self._current_path, "trim", self._current_path.suffix)
 
         job = _TrimWorker(self._current_path, dest_path, start_ms, end_ms)
         if self._start_job(job, self._on_trim_success, self._on_trim_failed):
@@ -722,6 +751,16 @@ class VideoPlayerWidget(QWidget):
     def _on_trim_failed(self, error: str) -> None:
         self._update_trim_ui()
         QMessageBox.warning(self, "Trim Error", error)
+
+    def export_color_adjusted(self, brightness: int, contrast: int) -> Optional[Path]:
+        """Start writing <name>_color.mp4 with the adjustment baked in. Returns the target path if started."""
+        if self._current_path is None or (brightness == 0 and contrast == 0):
+            return None
+        dest_path = _next_variant_path(self._current_path, "color", ".mp4")
+        job = _ColorExportWorker(self._current_path, dest_path, brightness, contrast)
+        if not self._start_job(job, self.colorExportCompleted.emit, self.colorExportFailed.emit):
+            return None
+        return dest_path
 
     def stop(self) -> None:
         self.banner.setVisible(False)

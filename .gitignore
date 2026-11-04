@@ -16,6 +16,9 @@ dist/
 *.spec
 uv.lock
 
+# Generated at build/install time by hatch-vcs
+src/hakuview/_version.py
+
 # Pytest & coverage
 .pytest_cache/
 .coverage

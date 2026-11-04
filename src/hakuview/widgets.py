@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import QPoint, QPointF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QPushButton, QWidget
 
 from .theme import PALETTE
@@ -25,6 +25,19 @@ def three_dots_icon(size: int = 24, color: Optional[QColor] = None) -> QIcon:
     return QIcon(pixmap)
 
 
+def chevron_icon(size: int = 16, color: Optional[QColor] = None) -> QIcon:
+    """Light '»' icon for the toolbar overflow button (Qt's stock arrow is invisible on the dark theme)."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(color or QColor(PALETTE["text"]), 1.6))
+    for x0 in (size * 0.25, size * 0.5):
+        painter.drawPolyline([QPointF(x0, size * 0.3), QPointF(x0 + size * 0.2, size * 0.5), QPointF(x0, size * 0.7)])
+    painter.end()
+    return QIcon(pixmap)
+
+
 class FullscreenControls(QWidget):
     """Floating More / Restore / Close buttons shown in the top-right corner while fullscreen."""
 
@@ -35,6 +48,8 @@ class FullscreenControls(QWidget):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.setObjectName("fullscreenOverlay")  # styled by theme.APP_QSS
+        # QWidget subclasses only paint a stylesheet background with this attribute set.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 3, 4, 3)
         layout.setSpacing(4)

@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QWidget
 
-from . import __app_name__, __version__
+from . import __app_name__, display_version
 from .installer import ensure_hakuview_ico
 from .theme import PALETTE
 
@@ -66,7 +66,7 @@ def show_about_dialog(parent: QWidget) -> None:
     box.setTextFormat(Qt.TextFormat.RichText)
     box.setIconPixmap(QIcon(str(ensure_hakuview_ico())).pixmap(64, 64))
     box.setText(
-        f"<h3>🦉 {__app_name__} <span style='font-size: 13px; color: {accent};'>v{__version__}</span></h3>"
+        f"<h3>🦉 {__app_name__} <span style='font-size: 13px; color: {accent};'>v{display_version()}</span></h3>"
         "<p>Fast, lightweight IrfanView-inspired image & video viewer for Ubuntu & Windows.</p>"
         "<p><b>Features:</b> Instant middle-of-folder cycling, border crop, rotate, "
         "1-click compression, hardware-accelerated video playback, and slideshows.</p>"

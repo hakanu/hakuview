@@ -23,12 +23,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
-    QSizePolicy,
     QStackedWidget,
     QStatusBar,
     QToolBar,
@@ -57,7 +57,7 @@ from .info_dialog import MediaInfoDialog
 from .installer import ensure_hakuview_ico
 from .theme import APP_QSS
 from .video_view import VideoPlayerWidget, _format_ms
-from .widgets import FullscreenControls, menu_position_under, three_dots_icon
+from .widgets import FullscreenControls, chevron_icon, menu_position_under, three_dots_icon
 
 
 class HakuViewWindow(QMainWindow):
@@ -86,8 +86,6 @@ class HakuViewWindow(QMainWindow):
         self.slideshow_interval_sec: float = max(0.5, float(slideshow_interval))
         self.slideshow_timer = QTimer(self)
         self.slideshow_timer.timeout.connect(self._on_slideshow_tick)
-
-        self._toolbar_ext: Optional[QToolButton] = None
 
         self.setStyleSheet(APP_QSS)
         self._build_ui()
@@ -122,6 +120,7 @@ class HakuViewWindow(QMainWindow):
         self.color_bar = ColorAdjustBar(self)
         self.color_bar.changed.connect(self._on_color_changed)
         self.color_bar.saveRequested.connect(self.save_adjusted_image)
+        self.color_bar.saveVideoRequested.connect(self.export_adjusted_video)
         self.color_bar.closeRequested.connect(self.toggle_color_bar)
 
         central_container = QWidget(self)
@@ -139,13 +138,23 @@ class HakuViewWindow(QMainWindow):
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
         self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
         self.video_view.trimCompleted.connect(self._on_video_trimmed)
+        self.video_view.colorExportCompleted.connect(self._on_color_export_done)
+        self.video_view.colorExportFailed.connect(self._on_color_export_failed)
         self.video_view.infoRequested.connect(self.show_media_info_dialog)
 
         # Compact Top Toolbar
-        self.toolbar = QToolBar("Main Toolbar", self)
+        # Top bar = main toolbar (stretches; extra buttons go to its » overflow popup when the
+        # window is narrow) + the ⋯ button in a fixed slot on the right, so it is always reachable.
+        self.top_bar = QWidget(self)
+        self.top_bar.setObjectName("topBar")
+        top_layout = QHBoxLayout(self.top_bar)
+        top_layout.setContentsMargins(0, 0, 6, 0)
+        top_layout.setSpacing(0)
+        self.toolbar = QToolBar("Main Toolbar", self.top_bar)
         self.toolbar.setMovable(False)
         self.toolbar.setFloatable(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
+        top_layout.addWidget(self.toolbar, stretch=1)
+        self.setMenuWidget(self.top_bar)
 
         self.btn_open = self._add_tb_button("📂 Open", self.open_file_dialog, "Open an image or video file", "O")
         self.btn_prev = self._add_tb_button("◀ Prev", self.prev_item, "Previous file in folder", "←")
@@ -231,18 +240,19 @@ class HakuViewWindow(QMainWindow):
         self.btn_info.setEnabled(False)
 
         # Spacer & 3-dots More Options button
-        spacer = QWidget(self)
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.toolbar.addWidget(spacer)
-
-        self.btn_more = QPushButton(self)
+        self.btn_more = QPushButton(self.top_bar)
         self.btn_more.setObjectName("moreButton")
         self.btn_more.setIcon(three_dots_icon(size=22))
         self.btn_more.setIconSize(QSize(20, 20))
         self.btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_more.setToolTip("More Options (3 dots menu)")
         self.btn_more.clicked.connect(lambda: self.show_more_options_menu(self.btn_more))
-        self.toolbar.addWidget(self.btn_more)
+        top_layout.addWidget(self.btn_more)
+
+        overflow = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+        if overflow is not None:
+            overflow.setIcon(chevron_icon())
+            overflow.setToolTip("More toolbar buttons")
 
         # Floating top-right controls for fullscreen mode
         self.fs_overlay = FullscreenControls(self)
@@ -867,24 +877,55 @@ class HakuViewWindow(QMainWindow):
         self._display_current_file()
         self.status.showMessage(f"Transcoded to {new_mp4_path.name} and playing full video!", 5000)
 
-    def _on_video_trimmed(self, new_clip_path: Path) -> None:
-        if self.navigator.current_file and new_clip_path.parent == (self.navigator.folder or self.navigator.current_file.parent):
-            self.navigator.load_target(self.navigator.current_file)
+    def _add_new_file_to_folder(self, new_path: Path, message: str) -> None:
+        """Re-scan so a file written next to the current one shows up in ←/→ navigation."""
+        cur = self.navigator.current_file
+        if cur is not None and new_path.parent == cur.parent:
+            self.navigator.load_target(cur)
             self._update_ui_state()
-        self.status.showMessage(f"✂ Trimmed video saved: {new_clip_path.name} (Press → to view)", 8000)
+        self.status.showMessage(f"{message}: {new_path.name} (Press → to view)", 8000)
+
+    def _on_video_trimmed(self, new_clip_path: Path) -> None:
+        self._add_new_file_to_folder(new_clip_path, "✂ Trimmed video saved")
+
+    def export_adjusted_video(self) -> Optional[Path]:
+        """Write a copy of the current video with the brightness/contrast baked in (background ffmpeg)."""
+        if not self.current_is_video:
+            return None
+        if self.color_bar.is_neutral:
+            self.status.showMessage("Move the Brightness or Contrast slider first.", 3000)
+            return None
+        target = self.video_view.export_color_adjusted(self.color_bar.brightness, self.color_bar.contrast)
+        if target is not None:
+            self.color_bar.set_exporting(True)
+            self.status.showMessage(f"⏳ Exporting {target.name} in the background...", 5000)
+        return target
+
+    def _on_color_export_done(self, new_path: Path) -> None:
+        self.color_bar.set_exporting(False)
+        self._add_new_file_to_folder(new_path, "🎬 Color-adjusted video saved")
+
+    def _on_color_export_failed(self, error: str) -> None:
+        self.color_bar.set_exporting(False)
+        QMessageBox.warning(self, "Video Export Error", error)
 
     def toggle_fullscreen(self) -> None:
+        # Toolbars / status bar / overlay follow in changeEvent, which also covers the
+        # window manager toggling fullscreen on its own (e.g. a desktop-wide F11).
         if self.isFullScreen():
             self.showNormal()
-            self.toolbar.setVisible(True)
-            self.status.setVisible(True)
-            self.fs_overlay.hide()
         else:
-            self.toolbar.setVisible(False)
-            self.status.setVisible(False)
             self.showFullScreen()
-            self.fs_overlay.show()
+
+    def _apply_fullscreen_chrome(self) -> None:
+        fullscreen = self.isFullScreen()
+        for bar in (self.top_bar, self.status):
+            bar.setVisible(not fullscreen)
+        self.fs_overlay.setVisible(fullscreen)
+        if fullscreen:
             self.fs_overlay.place()
+            # The fullscreen geometry usually arrives after the state change; re-pin once it has.
+            QTimer.singleShot(0, self.fs_overlay.place)
 
     def toggle_info_overlay(self) -> None:
         self._info_visible = not self._info_visible
@@ -943,6 +984,7 @@ class HakuViewWindow(QMainWindow):
         has_file = cur is not None
         is_img = has_file and not self.current_is_video and self.document is not None
         is_vid = has_file and self.current_is_video
+        self.color_bar.set_video_mode(bool(is_vid))
 
         self.btn_prev.setEnabled(self.navigator.count > 1)
         self.btn_next.setEnabled(self.navigator.count > 1)
@@ -1018,42 +1060,15 @@ class HakuViewWindow(QMainWindow):
         self.video_view.shutdown()
         super().closeEvent(event)
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._hook_toolbar_extension()
-
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._hook_toolbar_extension()
         if self.isFullScreen():
             self.fs_overlay.place()
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
-            is_fs = self.isFullScreen()
-            self.fs_overlay.setVisible(is_fs)
-            if is_fs:
-                self.fs_overlay.place()
+            self._apply_fullscreen_chrome()
         super().changeEvent(event)
-
-    def _hook_toolbar_extension(self) -> None:
-        """Make Qt's overflow (») button open the More Options menu instead of its own popup."""
-        if self._toolbar_ext is not None:
-            return
-        ext = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
-        if ext is not None:
-            self._toolbar_ext = ext
-            ext.setToolTip("More Options (3 dots menu)")
-            ext.installEventFilter(self)
-
-    def eventFilter(self, watched, event) -> bool:
-        if watched is self._toolbar_ext and event.type() in (
-            QEvent.Type.MouseButtonPress,
-            QEvent.Type.MouseButtonDblClick,
-        ):
-            self.show_more_options_menu(anchor_widget=self._toolbar_ext)
-            return True
-        return super().eventFilter(watched, event)
 
     def show_more_options_menu(self, anchor_widget: Optional[QWidget] = None, exec_menu: bool = True) -> QMenu:
         menu = QMenu(self)

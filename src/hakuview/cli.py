@@ -7,12 +7,20 @@ from pathlib import Path
 import sys
 from typing import List, Optional
 
-from . import __app_name__, __version__
+from . import __app_name__, __version__, display_version
 from .installer import (
     install_desktop_integration,
     run_self_update,
     uninstall_desktop_integration,
 )
+
+
+class _VersionAction(argparse.Action):
+    """Like action="version", but only asks git for the version when the flag is used."""
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        print(f"{__app_name__} {display_version()}")
+        parser.exit()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,8 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-v",
         "--version",
-        action="version",
-        version=f"{__app_name__} {__version__}",
+        action=_VersionAction,
+        nargs=0,
+        help="Show the version and exit.",
     )
     return parser
 

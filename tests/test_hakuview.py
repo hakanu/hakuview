@@ -243,9 +243,6 @@ def test_more_options_menu_and_toolbar_extension(tmp_path: Path, qtbot) -> None:
     win.btn_more.click()
     assert len(called) == 1
 
-    # Verify extension hook
-    win._hook_toolbar_extension()
-
 
 def test_fullscreen_controls_overlay(tmp_path: Path, qtbot) -> None:
     _create_sample_image(tmp_path / "img1.png")
@@ -796,3 +793,95 @@ def test_video_color_adjustment_changes_decoded_frames(tmp_path: Path, qtbot) ->
     before = widget.adjusted_view._source.pixelColor(5, 5).red()
     after = widget.adjusted_view._image.pixelColor(5, 5).red()
     assert after > before + 50
+
+
+def test_color_export_bakes_preview_lut_into_new_video(tmp_path: Path, qtbot) -> None:
+    import shutil
+    import subprocess
+    from hakuview.image_ops import color_lut
+    from hakuview.video_view import _ColorExportWorker
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("ffmpeg not available")
+    src = tmp_path / "clip.mkv"
+    subprocess.run(
+        [ffmpeg, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=1",
+         "-pix_fmt", "yuv420p", str(src)],
+        check=True,
+    )
+
+    worker = _ColorExportWorker(src, tmp_path / "clip_color.mp4", brightness=-30, contrast=50)
+    done = []
+    worker.finished.connect(done.append)
+    worker.run()
+    assert done == [tmp_path / "clip_color.mp4"]
+
+    # The ffmpeg expression must reproduce the preview LUT exactly (checked on raw RGB, no codec noise).
+    def first_frame_rgb(extra_filter: str) -> bytes:
+        vf = ["-vf", extra_filter] if extra_filter else []
+        return subprocess.run(
+            [ffmpeg, "-loglevel", "error", "-i", str(src), "-frames:v", "1", *vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            capture_output=True, check=True,
+        ).stdout
+
+    expr = worker.lut_expression()
+    raw = first_frame_rgb("")
+    filtered = first_frame_rgb(f"format=rgb24,lutrgb=r={expr}:g={expr}:b={expr}")
+    lut = color_lut(-30, 50)
+    assert bytes(lut[x] for x in raw) == filtered
+
+
+def test_color_bar_offers_video_export_only_for_videos(tmp_path: Path, qtbot, monkeypatch) -> None:
+    win = _video_window(tmp_path, qtbot)
+    win.toggle_color_bar()
+    assert win.color_bar.btn_save_video.isVisible()
+    assert win.color_bar.btn_save.text() == "🖼 Save Frame"
+
+    started = []
+    monkeypatch.setattr(win.video_view, "export_color_adjusted", lambda b, c: started.append((b, c)) or tmp_path / "x.mp4")
+    win.export_adjusted_video()  # neutral sliders -> nothing to export
+    assert started == []
+    win.color_bar.slider_brightness.setValue(20)
+    win.color_bar.btn_save_video.click()
+    assert started == [(20, 0)]
+    assert not win.color_bar.btn_save_video.isEnabled()  # shows "Exporting..." until the job reports back
+    win._on_color_export_done(tmp_path / "x.mp4")
+    assert win.color_bar.btn_save_video.isEnabled()
+
+    _create_sample_image(tmp_path / "zz.png")
+    win.open_path(tmp_path / "zz.png")
+    assert not win.color_bar.btn_save_video.isVisible()
+    assert win.color_bar.btn_save.text() == "💾 Save as New Image"
+
+
+def test_more_button_stays_visible_when_toolbar_overflows(tmp_path: Path, qtbot) -> None:
+    _create_sample_image(tmp_path / "img1.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    win.resize(700, 500)
+    win.show()
+    qtbot.waitExposed(win)
+    assert win.toolbar.sizeHint().width() > win.width()  # really overflowing
+    assert win.btn_more.isVisible()
+
+
+def test_fullscreen_hides_bars_and_shows_controls(tmp_path: Path, qtbot) -> None:
+    _create_sample_image(tmp_path / "img1.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    win.show()
+    win.toggle_fullscreen()
+    assert not win.top_bar.isVisible() and not win.status.isVisible()
+    assert win.fs_overlay.isVisible()
+    # Styled backing must actually paint, or the light icons vanish over bright images.
+    assert win.fs_overlay.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+    win.toggle_fullscreen()
+    assert win.top_bar.isVisible() and not win.fs_overlay.isVisible()
+
+
+def test_version_comes_from_package_metadata_not_a_literal() -> None:
+    import hakuview
+
+    assert hakuview.__version__ not in ("", "0+unknown")
+    assert hakuview.__version__ in hakuview.display_version()

@@ -46,13 +46,9 @@ APP_QSS = _qss(
     """
     QMainWindow { background-color: @window; color: @text; }
 
-    /* ---- Toolbar ---- */
-    QToolBar {
-        background-color: @panel;
-        border-bottom: 1px solid @border_subtle;
-        spacing: 4px;
-        padding: 3px 6px;
-    }
+    /* ---- Toolbar (inside #topBar, next to the ⋯ button) ---- */
+    #topBar { background-color: @panel; border-bottom: 1px solid @border_subtle; }
+    QToolBar { background-color: @panel; border: none; spacing: 4px; padding: 3px 6px; }
     QToolBar QPushButton {
         background-color: @surface;
         color: @text;
@@ -68,7 +64,13 @@ APP_QSS = _qss(
         background-color: @surface_disabled;
         border-color: @border_disabled;
     }
-    QToolBar QPushButton#moreButton { padding: 2px 7px; }
+    #topBar QPushButton#moreButton {
+        background-color: @surface;
+        border: 1px solid @border;
+        border-radius: 4px;
+        padding: 4px 7px;
+    }
+    #topBar QPushButton#moreButton:hover { background-color: @surface_hover; border-color: @border_hover; }
     QToolBar QLabel { color: @text_muted; font-size: 12px; }
     QToolButton {
         background-color: @surface;
@@ -79,6 +81,7 @@ APP_QSS = _qss(
         font-size: 13px;
     }
     QToolButton:hover { background-color: @surface_hover; border-color: @border_hover; }
+    QToolBar QToolButton#qt_toolbar_ext_button { padding: 2px; min-width: 16px; }
 
     /* ---- Inputs ---- */
     QDoubleSpinBox {

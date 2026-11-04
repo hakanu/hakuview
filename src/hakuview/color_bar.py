@@ -12,12 +12,15 @@ class ColorAdjustBar(QWidget):
     """Two -100..100 sliders plus Reset / Save / Close. Styled by theme.APP_QSS (#colorBar)."""
 
     changed = Signal(int, int)  # brightness, contrast (user edits and Reset)
-    saveRequested = Signal()
+    saveRequested = Signal()  # image, or the current video frame, as a new image
+    saveVideoRequested = Signal()  # whole video re-encoded with the adjustment
     closeRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("colorBar")
+        # QWidget subclasses only paint a stylesheet background with this attribute set.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 3, 8, 3)
         layout.setSpacing(8)
@@ -39,6 +42,13 @@ class ColorAdjustBar(QWidget):
         self.btn_save.setToolTip("Save adjusted image or video frame as a new image file in the current folder (Ctrl+S)")
         self.btn_save.clicked.connect(self.saveRequested.emit)
         layout.addWidget(self.btn_save)
+
+        self.btn_save_video = QPushButton("🎬 Save as New Video", self)
+        self.btn_save_video.setObjectName("btnSaveAdj")
+        self.btn_save_video.setToolTip("Re-encode the whole video with this brightness/contrast into <name>_color.mp4")
+        self.btn_save_video.clicked.connect(self.saveVideoRequested.emit)
+        self.btn_save_video.hide()
+        layout.addWidget(self.btn_save_video)
 
         layout.addStretch(1)
 
@@ -74,6 +84,19 @@ class ColorAdjustBar(QWidget):
     @property
     def is_neutral(self) -> bool:
         return self.brightness == 0 and self.contrast == 0
+
+    def set_video_mode(self, is_video: bool) -> None:
+        self.btn_save.setText("🖼 Save Frame" if is_video else "💾 Save as New Image")
+        self.btn_save.setToolTip(
+            "Save the current video frame, adjusted, as a new image"
+            if is_video
+            else "Save the adjusted image as a new file in the current folder (Ctrl+S)"
+        )
+        self.btn_save_video.setVisible(is_video)
+
+    def set_exporting(self, exporting: bool) -> None:
+        self.btn_save_video.setEnabled(not exporting)
+        self.btn_save_video.setText("⏳ Exporting video..." if exporting else "🎬 Save as New Video")
 
     def reset(self) -> None:
         """Return both sliders to 0 without emitting `changed`."""
