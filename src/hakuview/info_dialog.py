@@ -270,8 +270,8 @@ class MediaInfoDialog(QDialog):
         self.path = path
         self.setWindowTitle(f"Media Inspector — {path.name}")
         self.setWindowIcon(QIcon(str(ensure_hakuview_ico())))
-        self.resize(680, 560)
-        self.setMinimumSize(560, 440)
+        self.resize(560, 430)
+        self.setMinimumSize(460, 340)
 
         self._info = extract_media_info(path)
         self._build_ui()
@@ -286,19 +286,19 @@ class MediaInfoDialog(QDialog):
             QTabWidget::pane {
                 border: 1px solid #28303e;
                 background-color: #171b23;
-                border-radius: 6px;
+                border-radius: 5px;
                 top: -1px;
             }
             QTabBar::tab {
                 background-color: #1b202a;
                 color: #94a3b8;
-                padding: 7px 16px;
-                margin-right: 4px;
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
+                padding: 4px 12px;
+                margin-right: 3px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
                 border: 1px solid #28303e;
                 border-bottom: none;
-                font-size: 12px;
+                font-size: 11px;
                 font-weight: 500;
             }
             QTabBar::tab:selected {
@@ -315,9 +315,9 @@ class MediaInfoDialog(QDialog):
                 background-color: #232936;
                 color: #f1f5f9;
                 border: 1px solid #374151;
-                border-radius: 5px;
-                padding: 6px 16px;
-                font-size: 12px;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 11px;
                 font-weight: 500;
             }
             QPushButton:hover {
@@ -342,15 +342,15 @@ class MediaInfoDialog(QDialog):
                 border: 1px solid #262c38;
                 border-radius: 4px;
                 font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-                font-size: 11px;
-                padding: 8px;
+                font-size: 10px;
+                padding: 4px;
             }
             """
         )
 
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(18, 16, 18, 16)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(10, 8, 10, 8)
+        root_layout.setSpacing(6)
 
         # -------------------------------------------------------------
         # 1. Header Card (File Name, Type Badge, Resolution, Size)
@@ -361,23 +361,23 @@ class MediaInfoDialog(QDialog):
             QFrame {
                 background-color: #181d26;
                 border: 1px solid #2a3342;
-                border-radius: 8px;
-                padding: 12px;
+                border-radius: 6px;
+                padding: 4px 8px;
             }
             """
         )
         h_layout = QHBoxLayout(header_frame)
-        h_layout.setContentsMargins(12, 10, 12, 10)
-        h_layout.setSpacing(14)
+        h_layout.setContentsMargins(4, 2, 4, 2)
+        h_layout.setSpacing(10)
 
         icon_label = QLabel("🎬" if self._info["is_video"] else "🖼️", header_frame)
-        icon_label.setStyleSheet("font-size: 32px;")
+        icon_label.setStyleSheet("font-size: 22px;")
         h_layout.addWidget(icon_label)
 
         title_box = QVBoxLayout()
-        title_box.setSpacing(3)
+        title_box.setSpacing(1)
         lbl_fname = QLabel(self._info["file_name"], header_frame)
-        lbl_fname.setStyleSheet("color: #f8fafc; font-size: 16px; font-weight: bold;")
+        lbl_fname.setStyleSheet("color: #f8fafc; font-size: 13px; font-weight: bold;")
         title_box.addWidget(lbl_fname)
 
         dims_text = (
@@ -385,7 +385,7 @@ class MediaInfoDialog(QDialog):
             f"({self._info.get('megapixels', '?')} MP) • {self._info.get('file_size_human', '')}"
         )
         lbl_sub = QLabel(dims_text, header_frame)
-        lbl_sub.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        lbl_sub.setStyleSheet("color: #94a3b8; font-size: 11px;")
         title_box.addWidget(lbl_sub)
         h_layout.addLayout(title_box, stretch=1)
 
@@ -395,7 +395,7 @@ class MediaInfoDialog(QDialog):
         # 2. Key Geek Metrics Row (Compression, Bitrate/BPP, Codec, Aspect)
         # -------------------------------------------------------------
         metrics_row = QHBoxLayout()
-        metrics_row.setSpacing(10)
+        metrics_row.setSpacing(6)
 
         comp_val = self._info.get("compression_ratio", "N/A")
         if self._info.get("space_saved"):
@@ -426,7 +426,7 @@ class MediaInfoDialog(QDialog):
         # Tab 1: General & Compression
         tab_general = QWidget()
         tg_layout = QVBoxLayout(tab_general)
-        tg_layout.setContentsMargins(14, 14, 14, 14)
+        tg_layout.setContentsMargins(6, 6, 6, 6)
         gen_data = [
             ("File Name", self._info["file_name"]),
             ("File Path", self._info["file_path"]),
@@ -451,7 +451,7 @@ class MediaInfoDialog(QDialog):
         # Tab 2: Streams / Visual Details
         tab_visual = QWidget()
         tv_layout = QVBoxLayout(tab_visual)
-        tv_layout.setContentsMargins(14, 14, 14, 14)
+        tv_layout.setContentsMargins(6, 6, 6, 6)
 
         if self._info["is_video"]:
             vid_data = [
@@ -470,7 +470,7 @@ class MediaInfoDialog(QDialog):
             if self._info.get("audio_streams"):
                 tab_audio = QWidget()
                 ta_layout = QVBoxLayout(tab_audio)
-                ta_layout.setContentsMargins(14, 14, 14, 14)
+                ta_layout.setContentsMargins(6, 6, 6, 6)
                 for i, aud in enumerate(self._info["audio_streams"]):
                     aud_data = [
                         ("Track", f"Audio #{i + 1}"),
@@ -497,7 +497,7 @@ class MediaInfoDialog(QDialog):
             if self._info.get("exif"):
                 tab_exif = QWidget()
                 te_layout = QVBoxLayout(tab_exif)
-                te_layout.setContentsMargins(14, 14, 14, 14)
+                te_layout.setContentsMargins(6, 6, 6, 6)
                 exif_list = sorted(self._info["exif"].items())
                 te_layout.addWidget(self._make_property_table(exif_list))
                 tabs.addTab(tab_exif, f"EXIF Data ({len(exif_list)})")
@@ -506,7 +506,7 @@ class MediaInfoDialog(QDialog):
         if self._info.get("raw_json"):
             tab_raw = QWidget()
             tr_layout = QVBoxLayout(tab_raw)
-            tr_layout.setContentsMargins(10, 10, 10, 10)
+            tr_layout.setContentsMargins(6, 6, 6, 6)
             txt_raw = QTextEdit(tab_raw)
             txt_raw.setReadOnly(True)
             txt_raw.setPlainText(json.dumps(self._info["raw_json"], indent=2))
@@ -519,7 +519,7 @@ class MediaInfoDialog(QDialog):
         # 4. Action Buttons (Copy Markdown, Close)
         # -------------------------------------------------------------
         btn_box = QHBoxLayout()
-        btn_box.setSpacing(10)
+        btn_box.setSpacing(8)
 
         self.btn_copy = QPushButton("📋 Copy Info Card", self)
         self.btn_copy.setObjectName("btn_copy")
@@ -541,21 +541,21 @@ class MediaInfoDialog(QDialog):
             QFrame {{
                 background-color: #171b23;
                 border: 1px solid #262c38;
-                border-radius: 6px;
-                padding: 6px 10px;
+                border-radius: 5px;
+                padding: 3px 6px;
             }}
             """
         )
         vbox = QVBoxLayout(frame)
-        vbox.setContentsMargins(4, 4, 4, 4)
-        vbox.setSpacing(2)
+        vbox.setContentsMargins(2, 2, 2, 2)
+        vbox.setSpacing(1)
 
         lbl_t = QLabel(title, frame)
-        lbl_t.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: bold; text-transform: uppercase;")
+        lbl_t.setStyleSheet("color: #94a3b8; font-size: 9px; font-weight: bold; text-transform: uppercase;")
         vbox.addWidget(lbl_t)
 
         lbl_v = QLabel(value, frame)
-        lbl_v.setStyleSheet(f"color: {accent_hex}; font-size: 13px; font-weight: bold;")
+        lbl_v.setStyleSheet(f"color: {accent_hex}; font-size: 12px; font-weight: bold;")
         vbox.addWidget(lbl_v)
         return frame
 
@@ -565,25 +565,25 @@ class MediaInfoDialog(QDialog):
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
 
         for i, (k, v) in enumerate(rows):
             row_frame = QFrame(container)
             bg = "#1b202a" if i % 2 == 0 else "#161a22"
             row_frame.setStyleSheet(
-                f"QFrame {{ background-color: {bg}; border-radius: 4px; padding: 4px 8px; }}"
+                f"QFrame {{ background-color: {bg}; border-radius: 3px; padding: 1px 4px; }}"
             )
             r_layout = QHBoxLayout(row_frame)
-            r_layout.setContentsMargins(8, 5, 8, 5)
+            r_layout.setContentsMargins(6, 2, 6, 2)
 
             lbl_k = QLabel(k, row_frame)
-            lbl_k.setFixedWidth(160)
-            lbl_k.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 500;")
+            lbl_k.setFixedWidth(135)
+            lbl_k.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
             r_layout.addWidget(lbl_k)
 
             lbl_v = QLabel(str(v), row_frame)
             lbl_v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lbl_v.setStyleSheet("color: #f1f5f9; font-size: 12px;")
+            lbl_v.setStyleSheet("color: #f1f5f9; font-size: 11px;")
             r_layout.addWidget(lbl_v, stretch=1)
 
             layout.addWidget(row_frame)
