@@ -973,6 +973,13 @@ def test_manual_update_check_reports_up_to_date_and_offline(qtbot, monkeypatch) 
     qtbot.waitUntil(lambda: len(shown) == 2, timeout=3000)
     assert "Network is unreachable" in shown[-1]
 
+    # No tags on GitHub at all is not the same as being up to date.
+    win = _window_with_fake_update_source(qtbot, monkeypatch, latest="")
+    win.check_for_updates(manual=True)
+    qtbot.waitUntil(lambda: len(shown) == 3, timeout=3000)
+    assert "No releases" in shown[-1]
+    shown.pop()
+
     # Automatic checks stay silent when offline.
     win.check_for_updates(manual=False)
     qtbot.waitUntil(lambda: not win.update_checker.running, timeout=3000)

@@ -117,7 +117,7 @@ class HakuViewWindow(QMainWindow):
         self._update_runner: Optional[UpdateRunner] = None
         if check_updates and self.update_settings.startup_check_due():
             # Let the first image paint before touching the network.
-            QTimer.singleShot(2500, lambda: self.check_for_updates(manual=False))
+            QTimer.singleShot(2500, self, lambda: self.check_for_updates(manual=False))
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -939,7 +939,7 @@ class HakuViewWindow(QMainWindow):
         if fullscreen:
             self.fs_overlay.place()
             # The fullscreen geometry usually arrives after the state change; re-pin once it has.
-            QTimer.singleShot(0, self.fs_overlay.place)
+            QTimer.singleShot(0, self.fs_overlay, self.fs_overlay.place)
 
     def toggle_info_overlay(self) -> None:
         self._info_visible = not self._info_visible
@@ -1170,9 +1170,20 @@ class HakuViewWindow(QMainWindow):
             if manual:
                 QMessageBox.information(self, "Check for Updates", f"Couldn't reach GitHub to check for updates.\n\n{error}")
             return
-        if not latest or not is_newer(latest):
+        if not latest:
             if manual:
-                QMessageBox.information(self, "Check for Updates", f"You're up to date ({__app_name__} {display_version()}).")
+                QMessageBox.information(
+                    self,
+                    "Check for Updates",
+                    f"No releases are published on GitHub yet, so there's nothing to compare against.\n\n"
+                    f"You have {__app_name__} {display_version()}.",
+                )
+            return
+        if not is_newer(latest):
+            if manual:
+                QMessageBox.information(
+                    self, "Check for Updates", f"You're up to date: {__app_name__} {display_version()} (latest is {latest})."
+                )
             return
         if not manual and latest == self.update_settings.skipped_version:
             return

@@ -105,18 +105,19 @@ class UpdateChecker(QObject):
     """Fetches the latest tag off the UI thread. Emits finished(latest_version_or_empty, error_or_empty)."""
 
     finished = Signal(str, str)
+    _done = Signal(str, str)  # emitted from the worker thread, delivered once on the UI thread
 
     def __init__(self, parent: Optional[QObject] = None, fetch=fetch_latest_version) -> None:
         super().__init__(parent)
         self._fetch = fetch
         self.running = False
-        self.finished.connect(self._on_finished)  # first slot, so `running` is cleared before others run
+        self._done.connect(self._on_done)
 
     def start(self) -> None:
         if self.running:
             return
         self.running = True
-        fetch, emit = self._fetch, self.finished.emit
+        fetch, emit = self._fetch, self._done.emit
 
         def work() -> None:
             try:
@@ -126,8 +127,9 @@ class UpdateChecker(QObject):
 
         QThreadPool.globalInstance().start(work)
 
-    def _on_finished(self, _latest: str, _error: str) -> None:
+    def _on_done(self, latest: str, error: str) -> None:
         self.running = False
+        self.finished.emit(latest, error)
 
 
 class UpdateRunner(QObject):

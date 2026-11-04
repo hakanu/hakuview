@@ -11,7 +11,7 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from PIL import ExifTags, Image
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -633,5 +633,5 @@ class MediaInfoDialog(QDialog):
         report = "\n".join(lines)
         QApplication.clipboard().setText(report)
         self.btn_copy.setText("✓ Copied to Clipboard!")
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(2000, lambda: self.btn_copy.setText("📋 Copy Info Card"))
+        # Context-object form: the timer is dropped if the dialog closes within 2 s.
+        QTimer.singleShot(2000, self.btn_copy, lambda: self.btn_copy.setText("📋 Copy Info Card"))

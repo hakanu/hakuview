@@ -34,8 +34,10 @@ def display_version() -> str:
                 timeout=2,
                 check=False,
             )
-            if res.returncode == 0 and res.stdout.strip():
-                return f"{__version__} ({res.stdout.strip()})"
+            described = res.stdout.strip()
+            # Exactly on a release tag (e.g. "v0.3.0"): the version already says it all.
+            if res.returncode == 0 and described and described.lstrip("v") != __version__:
+                return f"{__version__} ({described})"
         except (OSError, subprocess.SubprocessError):
             pass
     return __version__
