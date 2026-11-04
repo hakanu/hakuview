@@ -1152,7 +1152,7 @@ class HakuViewWindow(QMainWindow):
     def show_about_dialog(self) -> None:
         full_license_text = (
             "HakuView — MIT License\n\n"
-            "Copyright (c) 2026 HakuView\n\n"
+            "Copyright (c) 2026 Hakan Ünal (@hakanu_) / HakuView\n\n"
             "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
             "of this software and associated documentation files (the \"Software\"), to deal\n"
             "in the Software without restriction, including without limitation the rights\n"
@@ -1184,8 +1184,9 @@ class HakuViewWindow(QMainWindow):
             "<p>Fast, lightweight IrfanView-inspired image & video viewer for Ubuntu & Windows.</p>"
             "<p><b>Features:</b> Instant middle-of-folder cycling, border crop, rotate, "
             "1-click compression, hardware-accelerated video playback, and slideshows.</p>"
-            "<p>Released under the <b>MIT License</b>.<br>"
-            "Source code: <a href='https://github.com/hakanu/hakuview' style='color: #38bdf8;'>github.com/hakanu/hakuview</a></p>"
+            "<p><b>GitHub:</b> <a href='https://github.com/hakanu/hakuview' style='color: #38bdf8;'>github.com/hakanu/hakuview</a><br>"
+            "<b>Author / Twitter:</b> <a href='https://x.com/hakanu_' style='color: #38bdf8;'>x.com/hakanu_</a><br>"
+            "<b>License:</b> Released under the <b>MIT License</b>.</p>"
         )
         box.setDetailedText(full_license_text)
         box.exec()
