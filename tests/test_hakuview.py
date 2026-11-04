@@ -1371,3 +1371,43 @@ def _os_environ_path() -> str:
     import os as _os
 
     return _os.environ.get("PATH", "")
+
+
+@pytest.mark.parametrize("mode", ["dark", "light"])
+def test_checkbox_and_radio_state_is_visible(mode: str, qtbot) -> None:
+    """Regression: Fusion drew check marks grey-on-grey under the theme, so clicks looked dead."""
+    from PySide6.QtWidgets import QCheckBox, QRadioButton, QVBoxLayout, QWidget
+
+    win = HakuViewWindow()
+    qtbot.addWidget(win)
+    win.app_settings.theme = mode
+    win.apply_settings()
+
+    host = QWidget(win, Qt.WindowType.Window)  # child of the window, so the theme applies
+    layout = QVBoxLayout(host)
+    widgets = [QCheckBox("off"), QCheckBox("on"), QRadioButton("off"), QRadioButton("on")]
+    for w in widgets:
+        layout.addWidget(w)
+    widgets[1].setChecked(True)
+    widgets[3].setChecked(True)
+    host.show()
+    qtbot.waitExposed(host)
+
+    from hakuview import theme
+
+    accent = QColor(theme.PALETTE["accent_strong"])
+
+    def accent_pixels(w) -> int:
+        img = w.grab().toImage()
+        mid = img.height() // 2
+        return sum(
+            1
+            for x in range(0, 20)
+            for y in range(mid - 8, mid + 8)
+            if abs(img.pixelColor(x, y).red() - accent.red()) + abs(img.pixelColor(x, y).green() - accent.green())
+            + abs(img.pixelColor(x, y).blue() - accent.blue()) < 60
+        )
+
+    for off, on in ((widgets[0], widgets[1]), (widgets[2], widgets[3])):
+        assert accent_pixels(off) < 5, f"unchecked {type(off).__name__} should not look selected ({mode})"
+        assert accent_pixels(on) > 8, f"checked {type(on).__name__} must clearly show it ({mode})"

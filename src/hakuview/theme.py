@@ -141,25 +141,33 @@ def is_dark() -> bool:
     return _active == "dark"
 
 
-def _arrow_file(direction: str, color: str) -> str:
-    """Path of a small SVG arrow in `color` (QSS needs image files for arrow subcontrols)."""
+_SVG_SHAPES = {
+    "arrow-down": '<polygon points="1,3 9,3 5,8" fill="{c}"/>',
+    "arrow-up": '<polygon points="1,7 9,7 5,2" fill="{c}"/>',
+    "check": '<polyline points="2,5.2 4.2,7.4 8.2,2.8" fill="none" stroke="{c}" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round"/>',
+    "dot": '<circle cx="5" cy="5" r="2.6" fill="{c}"/>',
+}
+
+
+def _svg_file(shape: str, color: str) -> str:
+    """Path of a tiny 10x10 SVG in `color`: QSS needs image files for arrows and indicator marks."""
     folder = Path(tempfile.gettempdir()) / "hakuview-theme"
     folder.mkdir(exist_ok=True)
-    path = folder / f"arrow-{direction}-{color.lstrip('#')}.svg"
+    path = folder / f"{shape}-{color.lstrip('#')}.svg"
     if not path.exists():
-        points = "1,3 9,3 5,8" if direction == "down" else "1,7 9,7 5,2"
-        path.write_text(
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><polygon points="{points}" fill="{color}"/></svg>',
-            encoding="utf-8",
-        )
+        body = _SVG_SHAPES[shape].format(c=color)
+        path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">{body}</svg>', encoding="utf-8")
     return path.as_posix()
 
 
 def _qss(template: str) -> str:
     """Substitute @name palette tokens (QSS uses braces, so str.format doesn't fit)."""
     tokens = dict(PALETTE)
-    tokens["arrow_down"] = _arrow_file("down", PALETTE["text_muted"])
-    tokens["arrow_up"] = _arrow_file("up", PALETTE["text_muted"])
+    tokens["arrow_down"] = _svg_file("arrow-down", PALETTE["text_muted"])
+    tokens["arrow_up"] = _svg_file("arrow-up", PALETTE["text_muted"])
+    tokens["check_mark"] = _svg_file("check", "#ffffff")
+    tokens["radio_dot"] = _svg_file("dot", PALETTE["accent_strong"])
     return re.sub(r"@([a-z_]+)", lambda m: tokens[m.group(1)], template)
 
 
@@ -241,7 +249,33 @@ _APP_QSS_TEMPLATE = """
         padding: 2px 6px;
         font-size: 12px;
     }
-    QCheckBox { color: @text_soft; font-size: 12px; spacing: 4px; }
+    QCheckBox { color: @text_soft; font-size: 12px; spacing: 6px; }
+
+    /* Checkbox / radio indicators: Fusion draws its marks in a grey that disappears on these
+       backgrounds, so a click looked like it did nothing. Draw them from the palette instead. */
+    QCheckBox::indicator, QRadioButton::indicator { width: 14px; height: 14px; }
+    QCheckBox::indicator {
+        border: 1px solid @border_hover;
+        border-radius: 3px;
+        background-color: @surface;
+    }
+    QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: @accent; }
+    QCheckBox::indicator:checked {
+        background-color: @accent_strong;
+        border-color: @accent_strong;
+        image: url(@check_mark);
+    }
+    QRadioButton { spacing: 6px; }
+    QRadioButton::indicator {
+        border: 1px solid @border_hover;
+        border-radius: 8px;
+        background-color: @surface;
+    }
+    QRadioButton::indicator:checked { border-color: @accent_strong; image: url(@radio_dot); }
+    QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+        background-color: @surface_disabled;
+        border-color: @border_disabled;
+    }
     QComboBox {
         background-color: @surface;
         color: @text;
