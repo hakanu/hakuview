@@ -235,7 +235,7 @@ def test_more_options_menu_and_toolbar_extension(tmp_path: Path, qtbot) -> None:
     win.show()
 
     assert hasattr(win, "btn_more")
-    assert win.btn_more.text() == "⋮"
+    assert not win.btn_more.icon().isNull()
 
     # Verify menu action
     called = []
@@ -245,6 +245,50 @@ def test_more_options_menu_and_toolbar_extension(tmp_path: Path, qtbot) -> None:
 
     # Verify extension hook
     win._hook_toolbar_extension()
+
+
+def test_fullscreen_controls_overlay(tmp_path: Path, qtbot) -> None:
+    _create_sample_image(tmp_path / "img1.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    win.show()
+
+    assert hasattr(win, "fs_overlay")
+    assert hasattr(win, "fs_btn_restore")
+    assert hasattr(win, "fs_btn_close")
+    assert hasattr(win, "fs_btn_more")
+    assert not win.fs_overlay.isVisible()
+
+    # Enter fullscreen -> overlay becomes visible
+    win.toggle_fullscreen()
+    assert win.isFullScreen()
+    assert win.fs_overlay.isVisible()
+
+    # Click restore button -> restores normal window and hides overlay
+    win.fs_btn_restore.click()
+    assert not win.isFullScreen()
+    assert not win.fs_overlay.isVisible()
+
+
+def test_show_more_options_menu_execution(tmp_path: Path, qtbot) -> None:
+    _create_sample_image(tmp_path / "img1.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    win.show()
+
+    # Image mode (exec_menu=False avoids modal block)
+    menu_img = win.show_more_options_menu(exec_menu=False)
+    assert menu_img is not None
+    action_texts = [a.text() for a in menu_img.actions()]
+    assert any("Border Crop" in t for t in action_texts)
+    assert any("Media Inspector" in t for t in action_texts)
+
+    # Video mode
+    win.current_is_video = True
+    menu_vid = win.show_more_options_menu(exec_menu=False)
+    assert menu_vid is not None
+    vid_actions = [a.text() for a in menu_vid.actions()]
+    assert any("Trim Video" in t for t in vid_actions)
 
 
 def test_ensure_hakuview_ico() -> None:

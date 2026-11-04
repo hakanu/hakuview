@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -17,6 +17,8 @@ from PySide6.QtGui import (
     QIcon,
     QKeyEvent,
     QKeySequence,
+    QPainter,
+    QPixmap,
 )
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
@@ -61,6 +63,22 @@ def _human_size(num_bytes: int) -> str:
             return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} B"
         val /= 1024.0
     return f"{val:.1f} GB"
+
+
+def _create_three_dots_icon(color: QColor = QColor("#e2e8f0"), size: int = 24) -> QIcon:
+    """Draw a reliable, anti-aliased 3-dots icon that never renders as a blank font box."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(color)
+    painter.setPen(Qt.PenStyle.NoPen)
+    cx = size / 2.0
+    r = 1.8
+    for cy in (size * 0.25, size * 0.5, size * 0.75):
+        painter.drawEllipse(QPointF(cx, cy), r, r)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class HakuViewWindow(QMainWindow):
@@ -369,12 +387,72 @@ class HakuViewWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.toolbar.addWidget(spacer)
 
-        self.btn_more = QPushButton("⋮", self)
+        self.btn_more = QPushButton(self)
+        self.btn_more.setIcon(_create_three_dots_icon(size=22))
+        self.btn_more.setIconSize(QSize(20, 20))
         self.btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_more.setToolTip("More Options (3 dots menu)")
-        self.btn_more.setStyleSheet("font-weight: bold; font-size: 16px; padding: 2px 9px;")
+        self.btn_more.setStyleSheet("padding: 2px 7px;")
         self.btn_more.clicked.connect(lambda: self.show_more_options_menu(self.btn_more))
         self.toolbar.addWidget(self.btn_more)
+
+        # Floating top-right overlay controls for Fullscreen mode
+        self.fs_overlay = QWidget(self)
+        self.fs_overlay.setObjectName("fullscreenOverlay")
+        self.fs_overlay.setStyleSheet(
+            """
+            #fullscreenOverlay {
+                background-color: rgba(20, 23, 30, 0.90);
+                border: 1px solid #3b4252;
+                border-radius: 6px;
+            }
+            #fullscreenOverlay QPushButton {
+                background-color: transparent;
+                color: #e2e8f0;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 13px;
+                min-width: 22px;
+                min-height: 20px;
+            }
+            #fullscreenOverlay QPushButton:hover {
+                background-color: #353c4b;
+                border-color: #4b5563;
+            }
+            #fullscreenOverlay QPushButton#fsClose:hover {
+                background-color: #dc2626;
+                border-color: #ef4444;
+                color: #ffffff;
+            }
+            """
+        )
+        fs_layout = QHBoxLayout(self.fs_overlay)
+        fs_layout.setContentsMargins(4, 3, 4, 3)
+        fs_layout.setSpacing(4)
+
+        self.fs_btn_more = QPushButton(self.fs_overlay)
+        self.fs_btn_more.setIcon(_create_three_dots_icon(size=20))
+        self.fs_btn_more.setIconSize(QSize(16, 16))
+        self.fs_btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.fs_btn_more.setToolTip("More Options (3 dots menu)")
+        self.fs_btn_more.clicked.connect(lambda: self.show_more_options_menu(self.fs_btn_more))
+        fs_layout.addWidget(self.fs_btn_more)
+
+        self.fs_btn_restore = QPushButton("🗗", self.fs_overlay)
+        self.fs_btn_restore.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.fs_btn_restore.setToolTip("Exit Fullscreen (F or Esc)")
+        self.fs_btn_restore.clicked.connect(self.toggle_fullscreen)
+        fs_layout.addWidget(self.fs_btn_restore)
+
+        self.fs_btn_close = QPushButton("✕", self.fs_overlay)
+        self.fs_btn_close.setObjectName("fsClose")
+        self.fs_btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.fs_btn_close.setToolTip("Close Window (Ctrl+W)")
+        self.fs_btn_close.clicked.connect(self.close)
+        fs_layout.addWidget(self.fs_btn_close)
+
+        self.fs_overlay.hide()
 
         # Status Bar
         self.status = QStatusBar(self)
@@ -1013,10 +1091,25 @@ class HakuViewWindow(QMainWindow):
             self.showNormal()
             self.toolbar.setVisible(True)
             self.status.setVisible(True)
+            if hasattr(self, "fs_overlay"):
+                self.fs_overlay.hide()
         else:
             self.toolbar.setVisible(False)
             self.status.setVisible(False)
             self.showFullScreen()
+            if hasattr(self, "fs_overlay"):
+                self.fs_overlay.show()
+                self._position_fullscreen_overlay()
+
+    def _position_fullscreen_overlay(self) -> None:
+        if not hasattr(self, "fs_overlay") or not self.fs_overlay.isVisible():
+            return
+        self.fs_overlay.adjustSize()
+        w = self.fs_overlay.width()
+        margin_right = 16
+        margin_top = 12
+        self.fs_overlay.move(self.width() - w - margin_right, margin_top)
+        self.fs_overlay.raise_()
 
     def toggle_info_overlay(self) -> None:
         self._info_visible = not self._info_visible
@@ -1147,6 +1240,17 @@ class HakuViewWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._hook_toolbar_extension()
+        if hasattr(self, "fs_overlay") and self.isFullScreen():
+            self._position_fullscreen_overlay()
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.WindowStateChange:
+            is_fs = self.isFullScreen()
+            if hasattr(self, "fs_overlay"):
+                self.fs_overlay.setVisible(is_fs)
+                if is_fs:
+                    self._position_fullscreen_overlay()
+        super().changeEvent(event)
 
     def _hook_toolbar_extension(self) -> None:
         if not hasattr(self, "toolbar"):
@@ -1168,9 +1272,11 @@ class HakuViewWindow(QMainWindow):
                 return True
         return super().eventFilter(watched, event)
 
-    def show_more_options_menu(self, anchor_widget: Optional[QWidget] = None) -> None:
+    def show_more_options_menu(self, anchor_widget: Optional[QWidget] = None, exec_menu: bool = True) -> QMenu:
         menu = QMenu(self)
-        is_img = not self.current_is_video and self.document is not None
+        menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.Popup)
+        is_vid = self.current_is_video
+        is_img = not is_vid and self.document is not None
         has_file = self.navigator.current_file is not None
         modified = bool(is_img and self.document and self.document.modified)
 
@@ -1240,13 +1346,47 @@ class HakuViewWindow(QMainWindow):
         menu.addAction("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog)
         menu.addAction("🦉 About HakuView...", self.show_about_dialog)
 
-        # Show menu positioned under the anchor
+        # Position menu cleanly under the anchor button without spilling off-screen
         anchor = anchor_widget or getattr(self, "btn_more", None)
-        if anchor:
-            pos = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        menu.adjustSize()
+        menu_w = menu.sizeHint().width()
+        menu_h = menu.sizeHint().height()
+
+        if anchor and anchor.isVisible():
+            # Align menu's top-right corner with anchor's bottom-right corner
+            pos = anchor.mapToGlobal(QPoint(anchor.width() - menu_w, anchor.height()))
         else:
-            pos = self.mapToGlobal(QPoint(self.width() - 200, 30))
-        menu.exec(pos)
+            pos = self.mapToGlobal(QPoint(self.width() - menu_w - 16, 40))
+
+        # Clamp within available screen geometry so menu is never offscreen or hidden
+        screen = None
+        if anchor and hasattr(anchor, "screen"):
+            screen = anchor.screen()
+        if not screen:
+            screen = self.screen() or QApplication.primaryScreen()
+
+        if screen:
+            avail = screen.availableGeometry()
+            x = pos.x()
+            if x + menu_w > avail.right():
+                x = avail.right() - menu_w
+            if x < avail.left():
+                x = avail.left()
+            y = pos.y()
+            if y + menu_h > avail.bottom():
+                # Pop upwards if below bottom
+                if anchor and anchor.isVisible():
+                    y = anchor.mapToGlobal(QPoint(0, 0)).y() - menu_h
+                else:
+                    y = avail.bottom() - menu_h
+            if y < avail.top():
+                y = avail.top()
+            pos = QPoint(x, y)
+
+        menu.raise_()
+        if exec_menu:
+            menu.exec(pos)
+        return menu
 
     def show_shortcuts_dialog(self) -> None:
         msg = (
