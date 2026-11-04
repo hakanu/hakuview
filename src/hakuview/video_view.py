@@ -179,8 +179,50 @@ class VideoPlayerWidget(QWidget):
                 background-color: #262b36;
                 border: 1px solid #374151;
                 border-radius: 4px;
-                padding: 2px 6px;
+                padding: 2px 20px 2px 6px;
                 color: #f1f5f9;
+            }
+            QComboBox:hover {
+                background-color: #2e3442;
+                border-color: #4b5563;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #374151;
+            }
+            QComboBox::down-arrow {
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #94a3b8;
+                margin-right: 2px;
+            }
+            QComboBox::down-arrow:hover {
+                border-top: 5px solid #38bdf8;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1d25;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 4px;
+                selection-background-color: #0284c7;
+                selection-color: #ffffff;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 22px;
+                padding: 3px 8px;
+                color: #e2e8f0;
+                background-color: #1a1d25;
+            }
+            QComboBox QAbstractItemView::item:hover,
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
             }
             """
         )

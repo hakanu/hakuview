@@ -256,3 +256,16 @@ def test_ensure_hakuview_ico() -> None:
     assert ico_path.stat().st_size > 0
     icon = QIcon(str(ico_path))
     assert not icon.isNull()
+
+
+def test_combobox_popup_dark_theme(tmp_path: Path, qtbot) -> None:
+    _create_sample_image(tmp_path / "img1.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    win.show()
+
+    # The compression combo box popup view must have a dark background palette, not white
+    view = win.combo_compress.view()
+    bg_color = view.palette().base().color()
+    # Lightness is 0-255; dark background should be < 100, not 255 (white)
+    assert bg_color.lightness() < 100

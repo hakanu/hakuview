@@ -146,13 +146,69 @@ class HakuViewWindow(QMainWindow):
                 background-color: #1e222a;
                 border-color: #262b35;
             }
-            QDoubleSpinBox, QComboBox {
+            QDoubleSpinBox {
                 background-color: #252a34;
                 color: #e2e8f0;
                 border: 1px solid #353c4b;
                 border-radius: 4px;
                 padding: 2px 6px;
                 font-size: 12px;
+            }
+            QComboBox {
+                background-color: #252a34;
+                color: #e2e8f0;
+                border: 1px solid #353c4b;
+                border-radius: 4px;
+                padding: 2px 22px 2px 8px;
+                font-size: 12px;
+                min-height: 22px;
+            }
+            QComboBox:hover {
+                background-color: #2e3442;
+                border-color: #4b5563;
+            }
+            QComboBox:on {
+                border-color: #0284c7;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid #353c4b;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QComboBox::down-arrow {
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #94a3b8;
+                margin-right: 2px;
+            }
+            QComboBox::down-arrow:hover {
+                border-top: 5px solid #38bdf8;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1d25;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 4px;
+                selection-background-color: #0284c7;
+                selection-color: #ffffff;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 24px;
+                padding: 4px 10px;
+                color: #e2e8f0;
+                background-color: #1a1d25;
+            }
+            QComboBox QAbstractItemView::item:hover,
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
             }
             QCheckBox {
                 color: #cbd5e1;
