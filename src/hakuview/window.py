@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
     QDropEvent,
+    QIcon,
     QKeyEvent,
     QKeySequence,
 )
@@ -48,6 +49,7 @@ from .image_ops import (
     compress_image_as_variant,
     save_qimage_atomic,
 )
+from .installer import ensure_hakuview_ico
 from .video_view import VideoPlayerWidget
 
 
@@ -73,6 +75,7 @@ class HakuViewWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.setWindowTitle(__app_name__)
+        self.setWindowIcon(QIcon(str(ensure_hakuview_ico())))
         self.resize(1180, 780)
         self.setAcceptDrops(True)
 

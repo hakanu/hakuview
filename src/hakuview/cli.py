@@ -97,12 +97,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_self_update()
 
     # Import Qt only when launching the GUI so CLI utility flags stay instant
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HakuView.Desktop")
+        except Exception:
+            pass
+
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
+    from .installer import ensure_hakuview_ico
     from .window import HakuViewWindow
 
     app = QApplication(sys.argv if argv is None else ["hakuview", *argv])
     app.setApplicationName(__app_name__)
     app.setApplicationVersion(__version__)
+
+    ico_path = ensure_hakuview_ico()
+    if ico_path.exists():
+        app_icon = QIcon(str(ico_path))
+        app.setWindowIcon(app_icon)
 
     initial_path: Optional[Path] = Path(args.path) if args.path else None
     if initial_path is None and args.random:

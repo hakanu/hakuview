@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+
+from .folder_scanner import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS
 
 HAKUVIEW_SVG_ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <rect width="128" height="128" rx="26" fill="#0f172a"/>
@@ -109,31 +112,173 @@ def _uninstall_linux_integration() -> str:
     return f"Removed: {', '.join(removed)}" if removed else "No Linux desktop entry found."
 
 
+def ensure_hakuview_ico() -> Path:
+    """Ensure the multi-resolution HakuView ICO file exists on disk and return its path."""
+    if sys.platform.startswith("win"):
+        base_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "HakuView"
+    else:
+        base_dir = Path.home() / ".local" / "share" / "icons" / "hakuview"
+
+    ico_path = base_dir / "hakuview.ico"
+    if ico_path.exists():
+        return ico_path
+
+    base_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGBA", (256, 256), (15, 23, 42, 255))
+        draw = ImageDraw.Draw(img)
+        # Rounded container border
+        draw.rounded_rectangle([16, 26, 240, 230], radius=28, fill=(30, 41, 59), outline=(56, 189, 248), width=10)
+        # Golden eye
+        draw.ellipse([64, 74, 116, 126], fill=(250, 204, 21))
+        # Stylized mountain / wings
+        draw.polygon([(36, 204), (104, 124), (148, 168), (188, 128), (220, 204)], fill=(56, 189, 248))
+        img.save(
+            str(ico_path),
+            format="ICO",
+            sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+        )
+    except Exception:
+        pass
+    return ico_path
+
+
 def _install_windows_integration() -> str:
     import winreg  # type: ignore[import-not-found]
+    import ctypes
 
+    ico_path = ensure_hakuview_ico()
     exec_cmd = _resolve_executable_command()
     if not exec_cmd.startswith('"'):
         exec_cmd = f'"{exec_cmd}"'
 
-    key_path = r"Software\Classes\*\shell\HakuView"
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Open with HakuView")
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path + r"\command") as cmd_key:
-        winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, f'{exec_cmd} "%1"')
+    # 1. Register Context Menu for all files ('*' and 'Directory') with the official icon
+    for target in (r"Software\Classes\*\shell\HakuView", r"Software\Classes\Directory\shell\HakuView"):
+        title = "Open with HakuView" if "*" in target else "Open Folder in HakuView"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, target) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, title)
+            winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, f'"{ico_path}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, target + r"\command") as cmd_key:
+            winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, f'{exec_cmd} "%1"')
 
-    return "Registered 'Open with HakuView' in Windows Explorer context menu (HKCU)."
+    # 2. Register Application in Windows Explorer with proper Icon & SupportedTypes
+    # This ensures that "Open with -> hakuview-gui.exe" displays the real HakuView icon
+    for exe_name in ("hakuview-gui.exe", "hakuview.exe"):
+        app_path = rf"Software\Classes\Applications\{exe_name}"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_path) as k:
+            winreg.SetValueEx(k, "FriendlyAppName", 0, winreg.REG_SZ, "HakuView")
+            winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, f'"{ico_path}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{app_path}\DefaultIcon") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{ico_path}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{app_path}\shell\open\command") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'{exec_cmd} "%1"')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{app_path}\SupportedTypes") as k:
+            for ext in sorted(SUPPORTED_EXTENSIONS):
+                winreg.SetValueEx(k, ext, 0, winreg.REG_SZ, "")
+
+    # 3. Create ProgIDs HakuView.Image and HakuView.Video that preserve Windows Shell Thumbnail generation
+    # Photo Thumbnail Provider: {C7657C4A-9F68-40fa-A4DF-96BC08EB3551}
+    # Video Thumbnail Provider: {9DBD2C50-62AD-11D0-B88D-00A024ABF13F}
+    img_progid = r"Software\Classes\HakuView.Image"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, img_progid) as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "HakuView Image File")
+        winreg.SetValueEx(k, "FriendlyTypeName", 0, winreg.REG_SZ, "HakuView Image")
+        winreg.SetValueEx(k, "PerceivedType", 0, winreg.REG_SZ, "image")
+        winreg.SetValueEx(k, "Treatment", 0, winreg.REG_DWORD, 0)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{img_progid}\DefaultIcon") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{ico_path}",0')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{img_progid}\shell\open\command") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'{exec_cmd} "%1"')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{img_progid}\ShellEx\{{e357fccd-a995-4576-b01f-234630154e96}}") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{img_progid}\ShellEx\{{BB2E617C-0920-11d1-9A0B-00C04FC2D6C1}}") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}")
+
+    vid_progid = r"Software\Classes\HakuView.Video"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, vid_progid) as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "HakuView Video File")
+        winreg.SetValueEx(k, "FriendlyTypeName", 0, winreg.REG_SZ, "HakuView Video")
+        winreg.SetValueEx(k, "PerceivedType", 0, winreg.REG_SZ, "video")
+        winreg.SetValueEx(k, "Treatment", 0, winreg.REG_DWORD, 0)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{vid_progid}\DefaultIcon") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{ico_path}",0')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{vid_progid}\shell\open\command") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'{exec_cmd} "%1"')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{vid_progid}\ShellEx\{{e357fccd-a995-4576-b01f-234630154e96}}") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "{9DBD2C50-62AD-11D0-B88D-00A024ABF13F}")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{vid_progid}\ShellEx\{{BB2E617C-0920-11d1-9A0B-00C04FC2D6C1}}") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "{9DBD2C50-62AD-11D0-B88D-00A024ABF13F}")
+
+    # 4. Repair thumbnail generation for all media extensions in HKCU\Software\Classes
+    # If the user selected "Always open with hakuview-gui.exe", Windows created keys in HKCU\Software\Classes\.ext
+    # that lack PerceivedType or thumbnail handlers. We ensure PerceivedType="image" / "video" and link OpenWithProgids!
+    for ext in IMAGE_EXTENSIONS:
+        ext_key = rf"Software\Classes\{ext}"
+        try:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, ext_key) as k:
+                winreg.SetValueEx(k, "PerceivedType", 0, winreg.REG_SZ, "image")
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, ext_key, 0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
+                try:
+                    val, _ = winreg.QueryValueEx(k, "")
+                    if "hakuview" in val.lower() or val.endswith(".exe"):
+                        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "HakuView.Image")
+                except OSError:
+                    pass
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{ext_key}\OpenWithProgids") as k:
+                winreg.SetValueEx(k, "HakuView.Image", 0, winreg.REG_NONE, b"")
+        except OSError:
+            pass
+
+    for ext in VIDEO_EXTENSIONS:
+        ext_key = rf"Software\Classes\{ext}"
+        try:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, ext_key) as k:
+                winreg.SetValueEx(k, "PerceivedType", 0, winreg.REG_SZ, "video")
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, ext_key, 0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
+                try:
+                    val, _ = winreg.QueryValueEx(k, "")
+                    if "hakuview" in val.lower() or val.endswith(".exe"):
+                        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "HakuView.Video")
+                except OSError:
+                    pass
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{ext_key}\OpenWithProgids") as k:
+                winreg.SetValueEx(k, "HakuView.Video", 0, winreg.REG_NONE, b"")
+        except OSError:
+            pass
+
+    # 5. Flush and refresh Windows Explorer shell icon & thumbnail cache
+    try:
+        SHCNE_ASSOCCHANGED = 0x08000000
+        SHCNF_IDLIST = 0x0000
+        ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+    except Exception:
+        pass
+
+    return f"Successfully registered HakuView icon and restored Windows thumbnail previews: {ico_path}"
 
 
 def _uninstall_windows_integration() -> str:
     import winreg  # type: ignore[import-not-found]
+    import ctypes
 
     try:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\*\shell\HakuView\command")
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\*\shell\HakuView")
-        return "Removed 'Open with HakuView' from Windows Explorer context menu."
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\shell\HakuView\command")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\shell\HakuView")
     except OSError:
-        return "No Windows registry entry found."
+        pass
+
+    try:
+        SHCNE_ASSOCCHANGED = 0x08000000
+        SHCNF_IDLIST = 0x0000
+        ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+    except Exception:
+        pass
+
+    return "Removed 'Open with HakuView' from Windows Explorer context menu."
 
 
 def run_self_update() -> int:

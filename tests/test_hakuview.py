@@ -245,3 +245,14 @@ def test_more_options_menu_and_toolbar_extension(tmp_path: Path, qtbot) -> None:
 
     # Verify extension hook
     win._hook_toolbar_extension()
+
+
+def test_ensure_hakuview_ico() -> None:
+    from hakuview.installer import ensure_hakuview_ico
+    from PySide6.QtGui import QIcon
+
+    ico_path = ensure_hakuview_ico()
+    assert ico_path.exists()
+    assert ico_path.stat().st_size > 0
+    icon = QIcon(str(ico_path))
+    assert not icon.isNull()
