@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Optional
+from typing import List, Optional
 
-from PySide6.QtCore import QObject, QRect, QThread, QThreadPool, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QResizeEvent
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QSizeF, QThread, QThreadPool, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QComboBox,
@@ -18,11 +18,15 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QStackedWidget,
     QStyle,
     QStyleOptionSlider,
     QVBoxLayout,
     QWidget,
 )
+
+
+from .image_ops import apply_color_lut, color_lut
 
 
 def _format_ms(ms: int) -> str:
@@ -273,68 +277,18 @@ class TrimSeekSlider(ClickableSlider):
         painter.end()
 
 
-class VideoColorOverlay(QWidget):
-    """Semi-transparent visual overlay for brightness & contrast scaling on video widgets."""
+class _ClickToPlayMixin:
+    """Left click emits `clicked` (delayed so a double click can cancel it); double click emits `doubleClicked`.
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.brightness: int = 0
-        self.contrast: int = 0
+    The host class must declare `clicked` and `doubleClicked` signals and call `_init_click_timer()`.
+    """
 
-    def set_color(self, brightness: int, contrast: int) -> None:
-        if self.brightness == brightness and self.contrast == contrast:
-            return
-        self.brightness = brightness
-        self.contrast = contrast
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        if self.brightness == 0 and self.contrast == 0:
-            return
-        painter = QPainter(self)
-        rect = self.rect()
-
-        # 1. Brightness scaling
-        if self.brightness > 0:
-            alpha = int(min(250, self.brightness * 2.2))
-            painter.fillRect(rect, QColor(255, 255, 255, alpha))
-        elif self.brightness < 0:
-            alpha = int(min(250, -self.brightness * 2.2))
-            painter.fillRect(rect, QColor(0, 0, 0, alpha))
-
-        # 2. Contrast scaling
-        if self.contrast > 0:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Overlay)
-            alpha = int(min(240, self.contrast * 2.0))
-            painter.fillRect(rect, QColor(128, 128, 128, alpha))
-        elif self.contrast < 0:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            alpha = int(min(220, -self.contrast * 1.8))
-            painter.fillRect(rect, QColor(128, 128, 128, alpha))
-
-        painter.end()
-
-
-class ClickableVideoWidget(QVideoWidget):
-    """QVideoWidget that emits clicked and doubleClicked signals on mouse events."""
-
-    clicked = Signal()
-    doubleClicked = Signal()
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
+    def _init_click_timer(self) -> None:
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(220)
         self._click_timer.timeout.connect(self.clicked.emit)
-        self.color_overlay = VideoColorOverlay(self)
-
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self.color_overlay.setGeometry(self.rect())
-        self.color_overlay.raise_()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -350,6 +304,94 @@ class ClickableVideoWidget(QVideoWidget):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+
+class ClickableVideoWidget(_ClickToPlayMixin, QVideoWidget):
+    """Hardware-accelerated video output used when no color adjustment is active."""
+
+    clicked = Signal()
+    doubleClicked = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._init_click_timer()
+
+
+class AdjustedVideoView(_ClickToPlayMixin, QWidget):
+    """Video output that applies a brightness/contrast LUT to every frame before painting it.
+
+    QVideoWidget renders on its own native/GPU surface, so nothing painted on top of it can
+    change the video's pixels. This view instead receives decoded frames from its own
+    QVideoSink, scales them down to the view size, runs them through the color LUT and paints
+    them. It costs CPU, so the player only routes video here while an adjustment is active.
+    """
+
+    clicked = Signal()
+    doubleClicked = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._init_click_timer()
+        self.sink = QVideoSink(self)
+        self.sink.videoFrameChanged.connect(self._on_frame)
+        self._lut: Optional[List[int]] = None
+        self._source: Optional[QImage] = None  # latest frame, scaled to the view, before the LUT
+        self._image: Optional[QImage] = None  # what gets painted
+        self._pending: Optional[QVideoFrame] = None
+        # Frames arrive faster than we may process them; coalesce so only the newest is converted.
+        self._process_timer = QTimer(self)
+        self._process_timer.setSingleShot(True)
+        self._process_timer.setInterval(0)
+        self._process_timer.timeout.connect(self._process_pending)
+
+    def set_lut(self, lut: Optional[List[int]]) -> None:
+        self._lut = lut
+        self._render()
+
+    def show_frame(self, frame: QVideoFrame) -> None:
+        """Seed the view with a frame (e.g. the paused frame when switching into this view)."""
+        self._pending = frame
+        self._process_pending()
+
+    def clear(self) -> None:
+        self._pending = None
+        self._source = None
+        self._image = None
+        self.update()
+
+    def _on_frame(self, frame: QVideoFrame) -> None:
+        self._pending = frame
+        if not self._process_timer.isActive():
+            self._process_timer.start()
+
+    def _process_pending(self) -> None:
+        frame, self._pending = self._pending, None
+        if frame is None or not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        target = self.size() * self.devicePixelRatioF()
+        if image.width() > target.width() or image.height() > target.height():
+            image = image.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._source = image
+        self._render()
+
+    def _render(self) -> None:
+        if self._source is not None:
+            self._image = apply_color_lut(self._source, self._lut) if self._lut else self._source
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        if self._image is not None and not self._image.isNull():
+            size = self._image.deviceIndependentSize().scaled(QSizeF(self.size()), Qt.AspectRatioMode.KeepAspectRatio)
+            target = QRectF(QPointF(0, 0), size)
+            target.moveCenter(QRectF(self.rect()).center())
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(target, self._image)
+        painter.end()
 
 
 class VideoPlayerWidget(QWidget):
@@ -380,90 +422,18 @@ class VideoPlayerWidget(QWidget):
         self.video_widget.doubleClicked.connect(self.doubleClicked.emit)
         self.player.setVideoOutput(self.video_widget)
 
+        self.adjusted_view = AdjustedVideoView(self)
+        self.adjusted_view.clicked.connect(self.toggle_play_pause)
+        self.adjusted_view.doubleClicked.connect(self.doubleClicked.emit)
+
+        # Normal playback uses the GPU-backed QVideoWidget; color adjustments switch to AdjustedVideoView.
+        self.video_stack = QStackedWidget(self)
+        self.video_stack.addWidget(self.video_widget)
+        self.video_stack.addWidget(self.adjusted_view)
+
         # Transport bar
         self.controls_bar = QWidget(self)
-        self.controls_bar.setStyleSheet(
-            """
-            QWidget {
-                background-color: #161920;
-                color: #e2e8f0;
-                font-size: 12px;
-            }
-            QPushButton {
-                background-color: #262b36;
-                border: 1px solid #374151;
-                border-radius: 4px;
-                padding: 4px 10px;
-                color: #f1f5f9;
-            }
-            QPushButton:hover {
-                background-color: #334155;
-            }
-            QPushButton:disabled {
-                background-color: #1e222a;
-                color: #64748b;
-                border-color: #282f3a;
-            }
-            QPushButton#btn_trim_ready {
-                background-color: #0284c7;
-                color: #ffffff;
-                font-weight: bold;
-                border: 1px solid #38bdf8;
-            }
-            QPushButton#btn_trim_ready:hover {
-                background-color: #0369a1;
-            }
-            QComboBox {
-                background-color: #262b36;
-                border: 1px solid #374151;
-                border-radius: 4px;
-                padding: 2px 20px 2px 6px;
-                color: #f1f5f9;
-            }
-            QComboBox:hover {
-                background-color: #2e3442;
-                border-color: #4b5563;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 18px;
-                border-left: 1px solid #374151;
-            }
-            QComboBox::down-arrow {
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #94a3b8;
-                margin-right: 2px;
-            }
-            QComboBox::down-arrow:hover {
-                border-top: 5px solid #38bdf8;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1a1d25;
-                color: #e2e8f0;
-                border: 1px solid #334155;
-                border-radius: 4px;
-                padding: 4px;
-                selection-background-color: #0284c7;
-                selection-color: #ffffff;
-                outline: none;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 22px;
-                padding: 3px 8px;
-                color: #e2e8f0;
-                background-color: #1a1d25;
-            }
-            QComboBox QAbstractItemView::item:hover,
-            QComboBox QAbstractItemView::item:selected {
-                background-color: #0284c7;
-                color: #ffffff;
-            }
-            """
-        )
+        self.controls_bar.setObjectName("videoControls")  # styled by theme.APP_QSS
         bar_layout = QHBoxLayout(self.controls_bar)
         bar_layout.setContentsMargins(10, 6, 10, 6)
         bar_layout.setSpacing(8)
@@ -544,32 +514,7 @@ class VideoPlayerWidget(QWidget):
         # AV1 compatibility banner
         self.banner = QWidget(self)
         self.banner.setVisible(False)
-        self.banner.setStyleSheet(
-            """
-            QWidget {
-                background-color: #2e1515;
-                border-bottom: 1px solid #7f1d1d;
-                color: #fecaca;
-                font-size: 12px;
-            }
-            QPushButton {
-                background-color: #ef4444;
-                color: #ffffff;
-                font-weight: bold;
-                border: none;
-                border-radius: 4px;
-                padding: 3px 10px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #dc2626;
-            }
-            QPushButton:disabled {
-                background-color: #4b5563;
-                color: #9ca3af;
-            }
-            """
-        )
+        self.banner.setObjectName("av1Banner")  # styled by theme.APP_QSS
         banner_layout = QHBoxLayout(self.banner)
         banner_layout.setContentsMargins(12, 6, 12, 6)
         self.lbl_banner = QLabel("⚠️ AV1 video stream: playing audio only (GPU lacks hardware AV1 decoder).", self.banner)
@@ -591,7 +536,7 @@ class VideoPlayerWidget(QWidget):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self.banner)
-        root_layout.addWidget(self.video_widget, stretch=1)
+        root_layout.addWidget(self.video_stack, stretch=1)
         root_layout.addWidget(self.controls_bar)
 
         # Signals
@@ -606,6 +551,7 @@ class VideoPlayerWidget(QWidget):
         self._in_slideshow = slideshow_active
         self._finished_emitted = False
         self.clear_trim()
+        self.set_color_scaling(0, 0)
         self.banner.setVisible(False)
 
         # Probe for AV1 streams off the UI thread (ffprobe can take a second or more);
@@ -780,6 +726,7 @@ class VideoPlayerWidget(QWidget):
     def stop(self) -> None:
         self.banner.setVisible(False)
         self.clear_trim()
+        self.set_color_scaling(0, 0)
         self.player.stop()
         self.player.setSource(QUrl())
 
@@ -812,14 +759,28 @@ class VideoPlayerWidget(QWidget):
             self.audio.setMuted(False)
             self.mute_btn.setText("🔊")
 
+    @property
+    def color_adjusting(self) -> bool:
+        return self.video_stack.currentWidget() is self.adjusted_view
+
     def set_color_scaling(self, brightness: int, contrast: int) -> None:
-        """Apply color scaling overlay to live video playback."""
-        self.video_widget.color_overlay.set_color(brightness, contrast)
+        """Apply brightness/contrast to live playback (0, 0 returns to the hardware video path)."""
+        active = brightness != 0 or contrast != 0
+        self.adjusted_view.set_lut(color_lut(brightness, contrast) if active else None)
+        if active and not self.color_adjusting:
+            paused_frame = self.video_widget.videoSink().videoFrame()
+            self.player.setVideoSink(self.adjusted_view.sink)
+            self.video_stack.setCurrentWidget(self.adjusted_view)
+            self.adjusted_view.show_frame(paused_frame)
+        elif not active and self.color_adjusting:
+            self.player.setVideoOutput(self.video_widget)
+            self.video_stack.setCurrentWidget(self.video_widget)
+            self.adjusted_view.clear()
 
     def grab_current_frame(self) -> Optional[QImage]:
         """Extract the current video frame as a high-resolution QImage."""
         try:
-            sink = self.video_widget.videoSink()
+            sink = self.adjusted_view.sink if self.color_adjusting else self.video_widget.videoSink()
             if sink:
                 frame = sink.videoFrame()
                 if frame.isValid():

@@ -254,9 +254,9 @@ def test_fullscreen_controls_overlay(tmp_path: Path, qtbot) -> None:
     win.show()
 
     assert hasattr(win, "fs_overlay")
-    assert hasattr(win, "fs_btn_restore")
-    assert hasattr(win, "fs_btn_close")
-    assert hasattr(win, "fs_btn_more")
+    assert hasattr(win.fs_overlay, "btn_restore")
+    assert hasattr(win.fs_overlay, "btn_close")
+    assert hasattr(win.fs_overlay, "btn_more")
     assert not win.fs_overlay.isVisible()
 
     # Enter fullscreen -> overlay becomes visible
@@ -265,7 +265,7 @@ def test_fullscreen_controls_overlay(tmp_path: Path, qtbot) -> None:
     assert win.fs_overlay.isVisible()
 
     # Click restore button -> restores normal window and hides overlay
-    win.fs_btn_restore.click()
+    win.fs_overlay.btn_restore.click()
     assert not win.isFullScreen()
     assert not win.fs_overlay.isVisible()
 
@@ -477,12 +477,12 @@ def test_color_scaling_adjustments_and_save_new_image(tmp_path: Path, qtbot) -> 
     assert win.btn_color.isChecked()
 
     # Adjust brightness and contrast
-    win.slider_brightness.setValue(25)
-    win.slider_contrast.setValue(15)
-    assert win.color_brightness == 25
-    assert win.color_contrast == 15
-    assert win.lbl_b_val.text() == "+25"
-    assert win.lbl_c_val.text() == "+15"
+    win.color_bar.slider_brightness.setValue(25)
+    win.color_bar.slider_contrast.setValue(15)
+    assert win.color_bar.brightness == 25
+    assert win.color_bar.contrast == 15
+    assert win.color_bar.lbl_b_val.text() == "+25"
+    assert win.color_bar.lbl_c_val.text() == "+15"
 
     # Saving must save as a NEW image and not overwrite original
     new_path = win.save_adjusted_image()
@@ -495,10 +495,10 @@ def test_color_scaling_adjustments_and_save_new_image(tmp_path: Path, qtbot) -> 
 
     # Reset returns to neutral 0
     win.reset_color_adjustments()
-    assert win.color_brightness == 0
-    assert win.color_contrast == 0
-    assert win.lbl_b_val.text() == "0"
-    assert win.lbl_c_val.text() == "0"
+    assert win.color_bar.brightness == 0
+    assert win.color_bar.contrast == 0
+    assert win.color_bar.lbl_b_val.text() == "0"
+    assert win.color_bar.lbl_c_val.text() == "0"
 
 
 def test_random_moved_to_more_options_menu(tmp_path: Path, qtbot) -> None:
@@ -524,13 +524,16 @@ def test_video_color_scaling_and_frame_save(tmp_path: Path, qtbot) -> None:
     win.show()
 
     assert win.current_is_video
-    assert hasattr(win.video_view.video_widget, "color_overlay")
+    assert not win.video_view.color_adjusting
 
-    # Apply color adjustment to video
-    win.slider_brightness.setValue(30)
-    win.slider_contrast.setValue(20)
-    assert win.video_view.video_widget.color_overlay.brightness == 30
-    assert win.video_view.video_widget.color_overlay.contrast == 20
+    # Adjusting color routes video through the LUT-processing view; resetting restores the GPU path.
+    win.color_bar.slider_brightness.setValue(30)
+    win.color_bar.slider_contrast.setValue(20)
+    assert win.video_view.color_adjusting
+    assert win.video_view.adjusted_view._lut is not None
+    win.reset_color_adjustments()
+    assert not win.video_view.color_adjusting
+    win.color_bar.slider_brightness.setValue(30)
 
     # Mock frame grabber to test save_adjusted_image on video
     sample_frame = QImage(64, 64, QImage.Format.Format_RGB32)
@@ -709,3 +712,87 @@ def test_only_one_ffmpeg_job_runs_and_shutdown_cancels_it(tmp_path: Path, qtbot,
     assert not widget.is_job_running()
     assert thread.isFinished()
     assert not dest.exists()
+
+
+def _whatsapp_like_jpeg(path: Path) -> None:
+    # Already heavily compressed (q75, 4:2:0), like images received over messaging apps.
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (320, 240), "white")
+    draw = ImageDraw.Draw(img)
+    for i in range(0, 320, 8):
+        draw.line([(i, 0), (320 - i, 240)], fill=(i % 255, 90, 200 - i % 200), width=3)
+    img.save(path, quality=75, subsampling=2)
+
+
+def test_lossless_jpeg_without_jpegtran_refuses_instead_of_inflating(tmp_path: Path, monkeypatch) -> None:
+    from hakuview import image_ops
+
+    src = tmp_path / "chat photo.jpeg"
+    _whatsapp_like_jpeg(src)
+    monkeypatch.setattr(image_ops.shutil, "which", lambda name: None)
+    doc = ImageDocument(src, load_qimage_fast(src))
+
+    with pytest.raises(image_ops.CompressionError, match="jpegtran"):
+        image_ops.compress_image_as_variant(doc, "lossless")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["chat photo.jpeg"]
+
+
+def test_compression_never_keeps_a_larger_variant(tmp_path: Path) -> None:
+    from hakuview import image_ops
+
+    src = tmp_path / "photo.jpeg"
+    _whatsapp_like_jpeg(src)
+    doc = ImageDocument(src, load_qimage_fast(src))
+
+    # Re-encoding a q75 JPEG at q85 can only grow it.
+    with pytest.raises(image_ops.CompressionError, match="smaller"):
+        image_ops.compress_image_as_variant(doc, "smart")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["photo.jpeg"]
+
+
+def test_edited_jpeg_lossless_variant_keeps_source_quality(tmp_path: Path) -> None:
+    from PIL import Image, JpegImagePlugin
+    from hakuview import image_ops
+
+    src = tmp_path / "photo.jpeg"
+    _whatsapp_like_jpeg(src)
+    doc = ImageDocument(src, load_qimage_fast(src))
+    doc.crop(QRect(0, 0, 300, 220))
+
+    out, orig_bytes, new_bytes = image_ops.compress_image_as_variant(doc, "lossless")
+    with Image.open(src) as a, Image.open(out) as b:
+        assert b.quantization == a.quantization
+        assert JpegImagePlugin.get_sampling(b) == JpegImagePlugin.get_sampling(a)
+    assert new_bytes < orig_bytes
+
+
+def test_video_color_adjustment_changes_decoded_frames(tmp_path: Path, qtbot) -> None:
+    import shutil
+    import subprocess
+    from hakuview.video_view import VideoPlayerWidget
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    clip = tmp_path / "grey.mp4"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=0x404040:size=160x120:rate=15:duration=3",
+         "-pix_fmt", "yuv420p", str(clip)],
+        check=True,
+    )
+
+    widget = VideoPlayerWidget()
+    qtbot.addWidget(widget)
+    widget.resize(320, 240)
+    widget.show()
+    widget.load_video(clip)
+    try:
+        qtbot.waitUntil(lambda: widget.video_widget.videoSink().videoFrame().isValid(), timeout=5000)
+    except Exception:
+        pytest.skip("no video decoding backend available")
+
+    widget.set_color_scaling(60, 0)
+    qtbot.waitUntil(lambda: widget.adjusted_view._image is not None, timeout=5000)
+    before = widget.adjusted_view._source.pixelColor(5, 5).red()
+    after = widget.adjusted_view._image.pixelColor(5, 5).red()
+    assert after > before + 50

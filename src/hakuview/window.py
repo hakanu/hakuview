@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime
-import html
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
-    QColor,
     QDragEnterEvent,
     QDropEvent,
     QIcon,
     QKeyEvent,
     QKeySequence,
-    QPainter,
-    QPixmap,
 )
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
@@ -27,14 +23,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QSlider,
     QStackedWidget,
     QStatusBar,
     QToolBar,
@@ -43,11 +37,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __app_name__, __version__
+from . import __app_name__, dialogs
 from .canvas import ImageCanvas
+from .color_bar import ColorAdjustBar
 from .folder_scanner import SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
+from .formatting import human_size
 from .image_ops import (
     COMPRESSION_MODES,
+    CompressionError,
     ImageDocument,
     ImagePreloadCache,
     adjust_qimage_color,
@@ -56,26 +53,11 @@ from .image_ops import (
     _next_variant_path,
     save_qimage_atomic,
 )
-from .formatting import human_size
-from .installer import ensure_hakuview_ico
 from .info_dialog import MediaInfoDialog
+from .installer import ensure_hakuview_ico
+from .theme import APP_QSS
 from .video_view import VideoPlayerWidget, _format_ms
-
-
-def _create_three_dots_icon(color: QColor = QColor("#e2e8f0"), size: int = 24) -> QIcon:
-    """Draw a reliable, anti-aliased 3-dots icon that never renders as a blank font box."""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(color)
-    painter.setPen(Qt.PenStyle.NoPen)
-    cx = size / 2.0
-    r = 1.8
-    for cy in (size * 0.25, size * 0.5, size * 0.75):
-        painter.drawEllipse(QPointF(cx, cy), r, r)
-    painter.end()
-    return QIcon(pixmap)
+from .widgets import FullscreenControls, menu_position_under, three_dots_icon
 
 
 class HakuViewWindow(QMainWindow):
@@ -97,8 +79,6 @@ class HakuViewWindow(QMainWindow):
         self.current_is_video: bool = False
         self._info_visible: bool = False
         self._prompt_unsaved: bool = True
-        self.color_brightness: int = 0
-        self.color_contrast: int = 0
 
         # Slideshow state
         self.slideshow_active: bool = False
@@ -109,7 +89,7 @@ class HakuViewWindow(QMainWindow):
 
         self._toolbar_ext: Optional[QToolButton] = None
 
-        self._apply_dark_theme()
+        self.setStyleSheet(APP_QSS)
         self._build_ui()
         self._build_shortcuts()
 
@@ -131,159 +111,6 @@ class HakuViewWindow(QMainWindow):
     # UI Construction
     # ------------------------------------------------------------------
 
-    def _apply_dark_theme(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow {
-                background-color: #14161a;
-                color: #e2e8f0;
-            }
-            QToolBar {
-                background-color: #1a1d24;
-                border-bottom: 1px solid #2b303c;
-                spacing: 4px;
-                padding: 3px 6px;
-            }
-            QToolBar QPushButton {
-                background-color: #252a34;
-                color: #e2e8f0;
-                border: 1px solid #353c4b;
-                border-radius: 4px;
-                padding: 4px 9px;
-                font-size: 12px;
-            }
-            QToolBar QPushButton:hover {
-                background-color: #323946;
-                border-color: #4b5563;
-            }
-            QToolBar QPushButton:checked {
-                background-color: #0284c7;
-                border-color: #38bdf8;
-                color: #ffffff;
-            }
-            QToolBar QPushButton:disabled {
-                color: #64748b;
-                background-color: #1e222a;
-                border-color: #262b35;
-            }
-            QDoubleSpinBox {
-                background-color: #252a34;
-                color: #e2e8f0;
-                border: 1px solid #353c4b;
-                border-radius: 4px;
-                padding: 2px 6px;
-                font-size: 12px;
-            }
-            QComboBox {
-                background-color: #252a34;
-                color: #e2e8f0;
-                border: 1px solid #353c4b;
-                border-radius: 4px;
-                padding: 2px 22px 2px 8px;
-                font-size: 12px;
-                min-height: 22px;
-            }
-            QComboBox:hover {
-                background-color: #2e3442;
-                border-color: #4b5563;
-            }
-            QComboBox:on {
-                border-color: #0284c7;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 20px;
-                border-left: 1px solid #353c4b;
-                border-top-right-radius: 4px;
-                border-bottom-right-radius: 4px;
-            }
-            QComboBox::down-arrow {
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #94a3b8;
-                margin-right: 2px;
-            }
-            QComboBox::down-arrow:hover {
-                border-top: 5px solid #38bdf8;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1a1d25;
-                color: #e2e8f0;
-                border: 1px solid #334155;
-                border-radius: 6px;
-                padding: 4px;
-                selection-background-color: #0284c7;
-                selection-color: #ffffff;
-                outline: none;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 24px;
-                padding: 4px 10px;
-                color: #e2e8f0;
-                background-color: #1a1d25;
-            }
-            QComboBox QAbstractItemView::item:hover,
-            QComboBox QAbstractItemView::item:selected {
-                background-color: #0284c7;
-                color: #ffffff;
-            }
-            QCheckBox {
-                color: #cbd5e1;
-                font-size: 12px;
-                spacing: 4px;
-            }
-            QToolButton {
-                background-color: #252a34;
-                color: #e2e8f0;
-                border: 1px solid #353c4b;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 13px;
-            }
-            QToolButton:hover {
-                background-color: #323946;
-                border-color: #4b5563;
-            }
-            QMenu {
-                background-color: #1a1d25;
-                color: #e2e8f0;
-                border: 1px solid #334155;
-                border-radius: 6px;
-                padding: 4px 0;
-                font-size: 12px;
-            }
-            QMenu::item {
-                padding: 6px 24px 6px 14px;
-                background-color: transparent;
-            }
-            QMenu::item:selected {
-                background-color: #0284c7;
-                color: #ffffff;
-            }
-            QMenu::item:disabled {
-                color: #64748b;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #2b3240;
-                margin: 4px 8px;
-            }
-            QStatusBar {
-                background-color: #181b21;
-                color: #94a3b8;
-                border-top: 1px solid #262b35;
-                font-size: 12px;
-            }
-            QStatusBar QLabel {
-                color: #cbd5e1;
-                padding: 0 6px;
-            }
-            """
-        )
-
     def _build_ui(self) -> None:
         # Central stacked widget switching between ImageCanvas and VideoPlayerWidget
         self.stack = QStackedWidget(self)
@@ -292,8 +119,10 @@ class HakuViewWindow(QMainWindow):
         self.stack.addWidget(self.canvas)
         self.stack.addWidget(self.video_view)
 
-        # Color Adjustment Bar
-        self._build_color_bar()
+        self.color_bar = ColorAdjustBar(self)
+        self.color_bar.changed.connect(self._on_color_changed)
+        self.color_bar.saveRequested.connect(self.save_adjusted_image)
+        self.color_bar.closeRequested.connect(self.toggle_color_bar)
 
         central_container = QWidget(self)
         c_layout = QVBoxLayout(central_container)
@@ -318,36 +147,39 @@ class HakuViewWindow(QMainWindow):
         self.toolbar.setFloatable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
-        self.btn_open = self._add_tb_button("📂 Open (O)", self.open_file_dialog, "Open an image or video file")
-        self.btn_prev = self._add_tb_button("◀ Prev (←)", self.prev_item, "Previous file in folder")
-        self.btn_next = self._add_tb_button("Next (→) ▶", self.next_item, "Next file in folder")
+        self.btn_open = self._add_tb_button("📂 Open", self.open_file_dialog, "Open an image or video file", "O")
+        self.btn_prev = self._add_tb_button("◀ Prev", self.prev_item, "Previous file in folder", "←")
+        self.btn_next = self._add_tb_button("Next ▶", self.next_item, "Next file in folder", "→")
 
         self.toolbar.addSeparator()
 
-        self.btn_rot_left = self._add_tb_button("↺ Rotate L (L)", self.rotate_left, "Rotate 90° Counter-Clockwise")
-        self.btn_rot_right = self._add_tb_button("↻ Rotate R (R)", self.rotate_right, "Rotate 90° Clockwise")
-        self.btn_flip_h = self._add_tb_button("⇆ Flip H (H)", self.flip_horizontal, "Flip Horizontally")
+        self.btn_rot_left = self._add_tb_button("↺", self.rotate_left, "Rotate 90° counter-clockwise", "L")
+        self.btn_rot_right = self._add_tb_button("↻", self.rotate_right, "Rotate 90° clockwise", "R")
+        self.btn_flip_h = self._add_tb_button("⇆", self.flip_horizontal, "Flip horizontally", "H")
         self.btn_crop = self._add_tb_button(
-            "✂ Crop (C)",
+            "✂ Crop",
             self.trigger_crop_action,
-            "Press C to show border crop handles (or drag a box), then press C or Enter to apply crop",
+            "Show border crop handles (or drag a box), then press C or Enter to apply the crop",
+            "C",
         )
         self.btn_crop.setEnabled(False)
         self.btn_color = self._add_tb_button(
-            "🎨 Color (B)",
+            "🎨 Color",
             self.toggle_color_bar,
-            "Color Scaling: adjust brightness & contrast for images and videos (Shortcut: B)",
+            "Adjust brightness & contrast for images and videos",
+            "B",
             checkable=True,
         )
-        self.btn_undo = self._add_tb_button("↶ Undo (Ctrl+Z)", self.undo_edit, "Undo last image edit")
+        self.btn_undo = self._add_tb_button("↶ Undo", self.undo_edit, "Undo last image edit", "Ctrl+Z")
         self.btn_undo.setEnabled(False)
-        self.btn_save = self._add_tb_button("💾 Save (Ctrl+S)", self.save_current, "Save changes (Ctrl+Shift+S for Save As)")
+        self.btn_save = self._add_tb_button("💾 Save", self.save_current, "Save changes (Ctrl+Shift+S for Save As)", "Ctrl+S")
         self.btn_save.setEnabled(False)
 
         self.btn_compress = self._add_tb_button(
-            "🗜 Compress (K)",
+            "🗜 Compress",
             self.compress_current_variant,
-            "One-click compress & save as a variant file in the same folder (Shortcut: K)",
+            "Compress & save as a variant file in the same folder",
+            "K",
         )
         self.btn_compress.setEnabled(False)
 
@@ -361,15 +193,14 @@ class HakuViewWindow(QMainWindow):
         self.toolbar.addSeparator()
 
         self.btn_slideshow = self._add_tb_button(
-            "▶ Slideshow (W)",
+            "▶ Slideshow",
             self.toggle_slideshow,
-            "Start/Stop automatic slideshow (W or F5)",
+            "Start/stop automatic slideshow",
+            "W / F5",
             checkable=True,
         )
 
-        lbl_sec = QLabel(" Interval:")
-        lbl_sec.setStyleSheet("color: #94a3b8; font-size: 12px;")
-        self.toolbar.addWidget(lbl_sec)
+        self.toolbar.addWidget(QLabel(" Interval:"))
 
         self.spin_interval = QDoubleSpinBox(self)
         self.spin_interval.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -388,13 +219,14 @@ class HakuViewWindow(QMainWindow):
 
         self.toolbar.addSeparator()
 
-        self.btn_fit = self._add_tb_button("⊞ Fit (0)", self.canvas.zoom_fit, "Fit image to window")
-        self.btn_actual = self._add_tb_button("1:1 (1)", self.canvas.zoom_actual, "Actual pixel size (100%)")
-        self.btn_fullscreen = self._add_tb_button("⛶ Fullscreen (F)", self.toggle_fullscreen, "Toggle Fullscreen (F or F11)")
+        self.btn_fit = self._add_tb_button("⊞ Fit", self.canvas.zoom_fit, "Fit image to window", "0")
+        self.btn_actual = self._add_tb_button("1:1", self.canvas.zoom_actual, "Actual pixel size (100%)", "1")
+        self.btn_fullscreen = self._add_tb_button("⛶", self.toggle_fullscreen, "Toggle fullscreen", "F / F11")
         self.btn_info = self._add_tb_button(
-            "ℹ Info (I)",
+            "ℹ Info",
             self.show_media_info_dialog,
-            "Media Inspector: View compression ratio, bitrate, codec, EXIF & tech specs (Shortcut: I or Ctrl+I)",
+            "Media Inspector: compression ratio, bitrate, codec, EXIF & tech specs",
+            "I / Ctrl+I",
         )
         self.btn_info.setEnabled(False)
 
@@ -404,71 +236,19 @@ class HakuViewWindow(QMainWindow):
         self.toolbar.addWidget(spacer)
 
         self.btn_more = QPushButton(self)
-        self.btn_more.setIcon(_create_three_dots_icon(size=22))
+        self.btn_more.setObjectName("moreButton")
+        self.btn_more.setIcon(three_dots_icon(size=22))
         self.btn_more.setIconSize(QSize(20, 20))
         self.btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_more.setToolTip("More Options (3 dots menu)")
-        self.btn_more.setStyleSheet("padding: 2px 7px;")
         self.btn_more.clicked.connect(lambda: self.show_more_options_menu(self.btn_more))
         self.toolbar.addWidget(self.btn_more)
 
-        # Floating top-right overlay controls for Fullscreen mode
-        self.fs_overlay = QWidget(self)
-        self.fs_overlay.setObjectName("fullscreenOverlay")
-        self.fs_overlay.setStyleSheet(
-            """
-            #fullscreenOverlay {
-                background-color: rgba(20, 23, 30, 0.90);
-                border: 1px solid #3b4252;
-                border-radius: 6px;
-            }
-            #fullscreenOverlay QPushButton {
-                background-color: transparent;
-                color: #e2e8f0;
-                border: 1px solid transparent;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 13px;
-                min-width: 22px;
-                min-height: 20px;
-            }
-            #fullscreenOverlay QPushButton:hover {
-                background-color: #353c4b;
-                border-color: #4b5563;
-            }
-            #fullscreenOverlay QPushButton#fsClose:hover {
-                background-color: #dc2626;
-                border-color: #ef4444;
-                color: #ffffff;
-            }
-            """
-        )
-        fs_layout = QHBoxLayout(self.fs_overlay)
-        fs_layout.setContentsMargins(4, 3, 4, 3)
-        fs_layout.setSpacing(4)
-
-        self.fs_btn_more = QPushButton(self.fs_overlay)
-        self.fs_btn_more.setIcon(_create_three_dots_icon(size=20))
-        self.fs_btn_more.setIconSize(QSize(16, 16))
-        self.fs_btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.fs_btn_more.setToolTip("More Options (3 dots menu)")
-        self.fs_btn_more.clicked.connect(lambda: self.show_more_options_menu(self.fs_btn_more))
-        fs_layout.addWidget(self.fs_btn_more)
-
-        self.fs_btn_restore = QPushButton("🗗", self.fs_overlay)
-        self.fs_btn_restore.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.fs_btn_restore.setToolTip("Exit Fullscreen (F or Esc)")
-        self.fs_btn_restore.clicked.connect(self.toggle_fullscreen)
-        fs_layout.addWidget(self.fs_btn_restore)
-
-        self.fs_btn_close = QPushButton("✕", self.fs_overlay)
-        self.fs_btn_close.setObjectName("fsClose")
-        self.fs_btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.fs_btn_close.setToolTip("Close Window (Ctrl+W)")
-        self.fs_btn_close.clicked.connect(self.close)
-        fs_layout.addWidget(self.fs_btn_close)
-
-        self.fs_overlay.hide()
+        # Floating top-right controls for fullscreen mode
+        self.fs_overlay = FullscreenControls(self)
+        self.fs_overlay.moreClicked.connect(lambda: self.show_more_options_menu(self.fs_overlay.btn_more))
+        self.fs_overlay.restoreClicked.connect(self.toggle_fullscreen)
+        self.fs_overlay.closeClicked.connect(self.close)
 
         # Status Bar
         self.status = QStatusBar(self)
@@ -479,7 +259,7 @@ class HakuViewWindow(QMainWindow):
         self.lbl_dimensions = QLabel("")
         self.lbl_zoom = QLabel("")
         self.lbl_modified = QLabel("")
-        self.lbl_modified.setStyleSheet("color: #38bdf8; font-weight: bold;")
+        self.lbl_modified.setObjectName("modifiedLabel")
 
         self.status.addWidget(self.lbl_position)
         self.status.addWidget(self.lbl_filename, 1)
@@ -487,219 +267,66 @@ class HakuViewWindow(QMainWindow):
         self.status.addPermanentWidget(self.lbl_dimensions)
         self.status.addPermanentWidget(self.lbl_zoom)
 
-    def _build_color_bar(self) -> None:
-        self.color_bar = QWidget(self)
-        self.color_bar.setObjectName("colorBar")
-        self.color_bar.setStyleSheet(
-            """
-            #colorBar {
-                background-color: #1a1d25;
-                border-bottom: 1px solid #2b303c;
-                padding: 4px 8px;
-            }
-            #colorBar QLabel {
-                color: #94a3b8;
-                font-size: 11px;
-                font-weight: 500;
-            }
-            #colorBar QSlider::groove:horizontal {
-                height: 4px;
-                background: #2b3240;
-                border-radius: 2px;
-            }
-            #colorBar QSlider::sub-page:horizontal {
-                background: #0284c7;
-                border-radius: 2px;
-            }
-            #colorBar QSlider::handle:horizontal {
-                background: #38bdf8;
-                width: 12px;
-                margin: -4px 0;
-                border-radius: 6px;
-            }
-            #colorBar QPushButton {
-                background-color: #252a34;
-                color: #e2e8f0;
-                border: 1px solid #353c4b;
-                border-radius: 4px;
-                padding: 3px 8px;
-                font-size: 11px;
-            }
-            #colorBar QPushButton:hover {
-                background-color: #323946;
-                border-color: #4b5563;
-            }
-            #colorBar QPushButton#btnSaveAdj {
-                background-color: #0284c7;
-                color: #ffffff;
-                border-color: #38bdf8;
-                font-weight: 500;
-            }
-            #colorBar QPushButton#btnSaveAdj:hover {
-                background-color: #0369a1;
-            }
-            """
-        )
-        cb_layout = QHBoxLayout(self.color_bar)
-        cb_layout.setContentsMargins(8, 3, 8, 3)
-        cb_layout.setSpacing(8)
-
-        lbl_title = QLabel("🎨 Color Scaling:", self.color_bar)
-        lbl_title.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
-        cb_layout.addWidget(lbl_title)
-
-        lbl_b = QLabel("☀️ Brightness:", self.color_bar)
-        cb_layout.addWidget(lbl_b)
-
-        self.slider_brightness = QSlider(Qt.Orientation.Horizontal, self.color_bar)
-        self.slider_brightness.setRange(-100, 100)
-        self.slider_brightness.setValue(0)
-        self.slider_brightness.setFixedWidth(100)
-        self.slider_brightness.setToolTip("Adjust Brightness (-100 to +100)")
-        self.slider_brightness.valueChanged.connect(self._on_color_slider_changed)
-        cb_layout.addWidget(self.slider_brightness)
-
-        self.lbl_b_val = QLabel("0", self.color_bar)
-        self.lbl_b_val.setFixedWidth(28)
-        self.lbl_b_val.setStyleSheet("color: #e2e8f0; font-family: monospace; font-size: 11px;")
-        cb_layout.addWidget(self.lbl_b_val)
-
-        lbl_c = QLabel("◐ Contrast:", self.color_bar)
-        cb_layout.addWidget(lbl_c)
-
-        self.slider_contrast = QSlider(Qt.Orientation.Horizontal, self.color_bar)
-        self.slider_contrast.setRange(-100, 100)
-        self.slider_contrast.setValue(0)
-        self.slider_contrast.setFixedWidth(100)
-        self.slider_contrast.setToolTip("Adjust Contrast (-100 to +100)")
-        self.slider_contrast.valueChanged.connect(self._on_color_slider_changed)
-        cb_layout.addWidget(self.slider_contrast)
-
-        self.lbl_c_val = QLabel("0", self.color_bar)
-        self.lbl_c_val.setFixedWidth(28)
-        self.lbl_c_val.setStyleSheet("color: #e2e8f0; font-family: monospace; font-size: 11px;")
-        cb_layout.addWidget(self.lbl_c_val)
-
-        self.btn_reset_color = QPushButton("↺ Reset", self.color_bar)
-        self.btn_reset_color.setToolTip("Reset brightness & contrast back to 0")
-        self.btn_reset_color.clicked.connect(lambda: self.reset_color_adjustments())
-        cb_layout.addWidget(self.btn_reset_color)
-
-        self.btn_save_color = QPushButton("💾 Save as New Image", self.color_bar)
-        self.btn_save_color.setObjectName("btnSaveAdj")
-        self.btn_save_color.setToolTip("Save adjusted image or video frame as a new image file in the current folder (Ctrl+S)")
-        self.btn_save_color.clicked.connect(self.save_adjusted_image)
-        cb_layout.addWidget(self.btn_save_color)
-
-        cb_layout.addStretch(1)
-
-        self.btn_close_color = QPushButton("✕", self.color_bar)
-        self.btn_close_color.setToolTip("Close Color panel (B)")
-        self.btn_close_color.clicked.connect(self.toggle_color_bar)
-        cb_layout.addWidget(self.btn_close_color)
-
-        self.color_bar.hide()
-
     def toggle_color_bar(self) -> None:
-        """Toggle visibility of the Color Scaling adjustment bar."""
-        is_vis = self.color_bar.isVisible()
-        self.color_bar.setVisible(not is_vis)
-        self.btn_color.setChecked(not is_vis)
-        if not is_vis:
-            self.slider_brightness.setFocus()
+        """Toggle visibility of the brightness/contrast bar."""
+        visible = not self.color_bar.isVisible()
+        self.color_bar.setVisible(visible)
+        self.btn_color.setChecked(visible)
+        if visible:
+            self.color_bar.slider_brightness.setFocus()
 
-    def _on_color_slider_changed(self) -> None:
-        b = self.slider_brightness.value()
-        c = self.slider_contrast.value()
-        self.color_brightness = b
-        self.color_contrast = c
-
-        self.lbl_b_val.setText(f"{b:+d}" if b != 0 else "0")
-        self.lbl_c_val.setText(f"{c:+d}" if c != 0 else "0")
-
+    def _on_color_changed(self, brightness: int, contrast: int) -> None:
         if self.current_is_video:
-            self.video_view.set_color_scaling(b, c)
+            self.video_view.set_color_scaling(brightness, contrast)
         elif self.document is not None:
-            if b == 0 and c == 0:
-                self.canvas.set_image(self.document.current, reset_view=False)
-            else:
-                adj = adjust_qimage_color(self.document.current, b, c)
-                self.canvas.set_image(adj, reset_view=False)
-
+            self.canvas.set_image(adjust_qimage_color(self.document.current, brightness, contrast), reset_view=False)
         self._update_ui_state()
 
     def reset_color_adjustments(self, update_view: bool = True) -> None:
-        """Reset brightness and contrast sliders back to 0."""
-        self.color_brightness = 0
-        self.color_contrast = 0
-        self.slider_brightness.blockSignals(True)
-        self.slider_contrast.blockSignals(True)
-        self.slider_brightness.setValue(0)
-        self.slider_contrast.setValue(0)
-        self.slider_brightness.blockSignals(False)
-        self.slider_contrast.blockSignals(False)
-        self.lbl_b_val.setText("0")
-        self.lbl_c_val.setText("0")
-
+        """Reset brightness and contrast back to 0 (optionally without re-rendering)."""
+        self.color_bar.reset()
         if update_view:
-            if self.current_is_video:
-                self.video_view.set_color_scaling(0, 0)
-            elif self.document is not None:
-                self.canvas.set_image(self.document.current, reset_view=False)
-            self._update_ui_state()
+            self._on_color_changed(0, 0)
 
     def save_adjusted_image(self) -> Optional[Path]:
-        """Save color-adjusted image or current video frame as a new image file in the current folder."""
+        """Save the color-adjusted image (or current video frame) as a new image in the current folder."""
         cur = self.navigator.current_file
         if cur is None:
             return None
-
         if self.current_is_video:
             frame = self.video_view.grab_current_frame()
             if frame is None or frame.isNull():
                 QMessageBox.warning(self, __app_name__, "Could not capture the current video frame.")
                 return None
-            adj = adjust_qimage_color(frame, self.color_brightness, self.color_contrast)
             pos_sec = max(0, int(self.video_view.player.position() / 1000))
-            target = _next_variant_path(cur, f"frame_{pos_sec}s_color", ".png")
-            try:
-                save_qimage_atomic(adj, target)
-                if self.navigator.current_file:
-                    self.navigator.load_target(self.navigator.current_file)
-                self._update_ui_state()
-                self.status.showMessage(f"💾 Saved video frame as new image: {target.name} (Press → to view)", 8000)
-                return target
-            except Exception as exc:
-                QMessageBox.critical(self, "Save Error", f"Could not save adjusted video frame:\n{exc}")
-                return None
-
-        if self.document is None:
+            source, target, what = frame, _next_variant_path(cur, f"frame_{pos_sec}s_color", ".png"), "video frame"
+        elif self.document is not None:
+            source, target, what = self.document.current, _next_variant_path(cur, "color", cur.suffix or ".png"), "image"
+        else:
             return None
 
-        adj = adjust_qimage_color(self.document.current, self.color_brightness, self.color_contrast)
-        ext = cur.suffix if cur.suffix else ".png"
-        target = _next_variant_path(cur, "color", ext)
+        adjusted = adjust_qimage_color(source, self.color_bar.brightness, self.color_bar.contrast)
         try:
-            save_qimage_atomic(adj, target)
-            if self.navigator.current_file:
-                self.navigator.load_target(self.navigator.current_file)
-            self._update_ui_state()
-            self.status.showMessage(f"💾 Saved as new image: {target.name} (Press → to view)", 8000)
-            return target
+            save_qimage_atomic(adjusted, target)
         except Exception as exc:
-            QMessageBox.critical(self, "Save Error", f"Could not save adjusted image:\n{exc}")
+            QMessageBox.critical(self, "Save Error", f"Could not save adjusted {what}:\n{exc}")
             return None
+        self.navigator.load_target(cur)
+        self._update_ui_state()
+        self.status.showMessage(f"💾 Saved {what} as new image: {target.name} (Press → to view)", 8000)
+        return target
 
     def _add_tb_button(
         self,
         text: str,
         slot,
         tooltip: str,
+        shortcut: Optional[str] = None,
         checkable: bool = False,
     ) -> QPushButton:
         btn = QPushButton(text, self)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn.setToolTip(tooltip)
+        btn.setToolTip(f"{tooltip}  ({shortcut})" if shortcut else tooltip)
         btn.setCheckable(checkable)
         btn.clicked.connect(lambda _checked=False: slot())
         self.toolbar.addWidget(btn)
@@ -1061,7 +688,7 @@ class HakuViewWindow(QMainWindow):
             self.status.showMessage("Undid last change.", 2500)
 
     def save_current(self) -> bool:
-        if self.color_brightness != 0 or self.color_contrast != 0:
+        if not self.color_bar.is_neutral:
             return bool(self.save_adjusted_image())
         if self.document is None or self.current_is_video:
             return False
@@ -1135,6 +762,9 @@ class HakuViewWindow(QMainWindow):
 
             self.status.showMessage(f"Saved variant: {variant_path.name}  [{stats}]", 5500)
             return variant_path
+        except CompressionError as exc:
+            QMessageBox.information(self, "Compress", str(exc))
+            return None
         except Exception as exc:
             QMessageBox.critical(self, "Compression Error", f"Failed to compress image:\n{exc}")
             return None
@@ -1184,7 +814,7 @@ class HakuViewWindow(QMainWindow):
         self.video_view.set_slideshow_mode(active)
 
         if active:
-            self.btn_slideshow.setText("⏹ Stop (W)")
+            self.btn_slideshow.setText("⏹ Stop")
             self._start_slideshow_timer()
             self.status.showMessage(
                 f"Slideshow started ({self.slideshow_interval_sec:.1f}s interval, "
@@ -1192,7 +822,7 @@ class HakuViewWindow(QMainWindow):
                 3000,
             )
         else:
-            self.btn_slideshow.setText("▶ Slideshow (W)")
+            self.btn_slideshow.setText("▶ Slideshow")
             self.slideshow_timer.stop()
             self.status.showMessage("Slideshow stopped", 2000)
 
@@ -1254,17 +884,7 @@ class HakuViewWindow(QMainWindow):
             self.status.setVisible(False)
             self.showFullScreen()
             self.fs_overlay.show()
-            self._position_fullscreen_overlay()
-
-    def _position_fullscreen_overlay(self) -> None:
-        if not self.fs_overlay.isVisible():
-            return
-        self.fs_overlay.adjustSize()
-        w = self.fs_overlay.width()
-        margin_right = 16
-        margin_top = 12
-        self.fs_overlay.move(self.width() - w - margin_right, margin_top)
-        self.fs_overlay.raise_()
+            self.fs_overlay.place()
 
     def toggle_info_overlay(self) -> None:
         self._info_visible = not self._info_visible
@@ -1333,11 +953,11 @@ class HakuViewWindow(QMainWindow):
         self.btn_flip_h.setEnabled(is_img)
         self.btn_crop.setEnabled(is_img or is_vid)
         if is_vid:
-            self.btn_crop.setText("✂ Trim Video (T)")
-            self.btn_crop.setToolTip("Export trimmed video clip via lossless stream copy (Shortcuts: [ / ] or I / O, then T)")
+            self.btn_crop.setText("✂ Trim")
+            self.btn_crop.setToolTip("Export the marked clip with FFmpeg: mark In / Out with [ / ] or I / O, then press T  (T)")
         else:
-            self.btn_crop.setText("✂ Crop (C)")
-            self.btn_crop.setToolTip("Press C to show border crop handles (or drag a box), then press C or Enter to apply crop")
+            self.btn_crop.setText("✂ Crop")
+            self.btn_crop.setToolTip("Show border crop handles (or drag a box), then press C or Enter to apply the crop  (C)")
         self.btn_compress.setEnabled(is_img)
         self.combo_compress.setEnabled(is_img)
         self.btn_fit.setEnabled(is_img)
@@ -1345,7 +965,7 @@ class HakuViewWindow(QMainWindow):
         self.btn_info.setEnabled(has_file)
 
         modified = bool(is_img and self.document and self.document.modified)
-        has_color_adj = bool(self.color_brightness != 0 or self.color_contrast != 0)
+        has_color_adj = not self.color_bar.is_neutral
         self.btn_undo.setEnabled(modified)
         self.btn_save.setEnabled(modified or has_color_adj)
 
@@ -1406,14 +1026,14 @@ class HakuViewWindow(QMainWindow):
         super().resizeEvent(event)
         self._hook_toolbar_extension()
         if self.isFullScreen():
-            self._position_fullscreen_overlay()
+            self.fs_overlay.place()
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             is_fs = self.isFullScreen()
             self.fs_overlay.setVisible(is_fs)
             if is_fs:
-                self._position_fullscreen_overlay()
+                self.fs_overlay.place()
         super().changeEvent(event)
 
     def _hook_toolbar_extension(self) -> None:
@@ -1441,166 +1061,58 @@ class HakuViewWindow(QMainWindow):
         is_vid = self.current_is_video
         is_img = not is_vid and self.document is not None
         has_file = self.navigator.current_file is not None
-        modified = bool(is_img and self.document and self.document.modified)
+        modified = bool(is_img and self.document.modified)
 
-        # File actions
-        menu.addAction("📂 Open File... (O)", self.open_file_dialog)
-        act_save = menu.addAction("💾 Save (Ctrl+S)", self.save_current)
-        act_save.setEnabled(modified)
-        act_save_as = menu.addAction("💾 Save As... (Ctrl+Shift+S)", self.save_as_dialog)
-        act_save_as.setEnabled(is_img)
+        def add(text: str, slot, enabled: bool = True) -> QAction:
+            act = menu.addAction(text, slot)
+            act.setEnabled(enabled)
+            return act
 
+        add("📂 Open File... (O)", self.open_file_dialog)
+        add("💾 Save (Ctrl+S)", self.save_current, modified)
+        add("💾 Save As... (Ctrl+Shift+S)", self.save_as_dialog, is_img)
         menu.addSeparator()
 
-        # Image Compression
-        act_compress = menu.addAction("🗜 Compress Variant (K)", self.compress_current_variant)
-        act_compress.setEnabled(is_img)
-
-        compress_submenu = menu.addMenu("🎯 Compression Preset")
-        group = QActionGroup(compress_submenu)
-        group.setExclusive(True)
-        cur_mode = str(self.combo_compress.currentData() or "lossless")
+        add("🗜 Compress Variant (K)", self.compress_current_variant, is_img)
+        presets = menu.addMenu("🎯 Compression Preset")
+        group = QActionGroup(presets)
+        cur_mode = self.combo_compress.currentData()
         for idx, (label, mode_id) in enumerate(COMPRESSION_MODES):
-            mode_act = compress_submenu.addAction(label)
-            mode_act.setCheckable(True)
-            mode_act.setChecked(mode_id == cur_mode)
-            group.addAction(mode_act)
-
-            def _make_setter(index: int):
-                return lambda: self.combo_compress.setCurrentIndex(index)
-
-            mode_act.triggered.connect(_make_setter(idx))
-
+            act = presets.addAction(label, lambda index=idx: self.combo_compress.setCurrentIndex(index))
+            act.setCheckable(True)
+            act.setChecked(mode_id == cur_mode)
+            group.addAction(act)
         menu.addSeparator()
 
-        # Image & Video operations
-        act_crop = menu.addAction("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action)
-        act_crop.setEnabled(is_img or is_vid)
-        act_color = menu.addAction("🎨 Color Scaling / Brightness & Contrast (B)", self.toggle_color_bar)
-        act_color.setEnabled(has_file)
-        act_rotl = menu.addAction("↺ Rotate Left 90° (L)", self.rotate_left)
-        act_rotl.setEnabled(is_img)
-        act_rotr = menu.addAction("↻ Rotate Right 90° (R)", self.rotate_right)
-        act_rotr.setEnabled(is_img)
-        act_fliph = menu.addAction("⇆ Flip Horizontal (H)", self.flip_horizontal)
-        act_fliph.setEnabled(is_img)
-        act_flipv = menu.addAction("⇅ Flip Vertical (V)", self.flip_vertical)
-        act_flipv.setEnabled(is_img)
-        act_undo = menu.addAction("↶ Undo Edit (Ctrl+Z)", self.undo_edit)
-        act_undo.setEnabled(modified)
-
+        add("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action, is_img or is_vid)
+        add("🎨 Color Scaling / Brightness & Contrast (B)", self.toggle_color_bar, has_file)
+        add("↺ Rotate Left 90° (L)", self.rotate_left, is_img)
+        add("↻ Rotate Right 90° (R)", self.rotate_right, is_img)
+        add("⇆ Flip Horizontal (H)", self.flip_horizontal, is_img)
+        add("⇅ Flip Vertical (V)", self.flip_vertical, is_img)
+        add("↶ Undo Edit (Ctrl+Z)", self.undo_edit, modified)
         menu.addSeparator()
 
-        # Navigation & View
-        act_rand = menu.addAction("🎲 Random File (Ctrl+M)", self.random_item)
-        act_rand.setEnabled(self.navigator.count > 1)
-        act_slide = menu.addAction("▶ Slideshow (W or F5)", self.toggle_slideshow)
-        act_slide.setCheckable(True)
-        act_slide.setChecked(self.slideshow_active)
-        act_fit = menu.addAction("⊞ Fit to Window (0)", self.canvas.zoom_fit)
-        act_fit.setEnabled(is_img)
-        act_act = menu.addAction("1:1 Actual Size (1)", self.canvas.zoom_actual)
-        act_act.setEnabled(is_img)
-        menu.addAction("⛶ Fullscreen (F)", self.toggle_fullscreen)
-        act_info = menu.addAction("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog)
-        act_info.setEnabled(has_file)
-
+        add("🎲 Random File (Ctrl+M)", self.random_item, self.navigator.count > 1)
+        slide = add("▶ Slideshow (W or F5)", self.toggle_slideshow)
+        slide.setCheckable(True)
+        slide.setChecked(self.slideshow_active)
+        add("⊞ Fit to Window (0)", self.canvas.zoom_fit, is_img)
+        add("1:1 Actual Size (1)", self.canvas.zoom_actual, is_img)
+        add("⛶ Fullscreen (F)", self.toggle_fullscreen)
+        add("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog, has_file)
         menu.addSeparator()
-        menu.addAction("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog)
-        menu.addAction("🦉 About HakuView...", self.show_about_dialog)
+        add("⌨ Keyboard Shortcuts...", self.show_shortcuts_dialog)
+        add("🦉 About HakuView...", self.show_about_dialog)
 
-        # Position menu cleanly under the anchor button without spilling off-screen
-        anchor = anchor_widget or self.btn_more
-        menu.adjustSize()
-        menu_w = menu.sizeHint().width()
-        menu_h = menu.sizeHint().height()
-
-        if anchor.isVisible():
-            # Align menu's top-right corner with anchor's bottom-right corner
-            pos = anchor.mapToGlobal(QPoint(anchor.width() - menu_w, anchor.height()))
-        else:
-            pos = self.mapToGlobal(QPoint(self.width() - menu_w - 16, 40))
-
-        # Clamp within available screen geometry so menu is never offscreen or hidden
-        screen = anchor.screen() or self.screen() or QApplication.primaryScreen()
-
-        if screen:
-            avail = screen.availableGeometry()
-            x = pos.x()
-            if x + menu_w > avail.right():
-                x = avail.right() - menu_w
-            if x < avail.left():
-                x = avail.left()
-            y = pos.y()
-            if y + menu_h > avail.bottom():
-                # Pop upwards if below bottom
-                if anchor.isVisible():
-                    y = anchor.mapToGlobal(QPoint(0, 0)).y() - menu_h
-                else:
-                    y = avail.bottom() - menu_h
-            if y < avail.top():
-                y = avail.top()
-            pos = QPoint(x, y)
-
-        menu.raise_()
         if exec_menu:
-            menu.exec(pos)
+            menu.exec(menu_position_under(menu, anchor_widget or self.btn_more, fallback=self))
         return menu
 
     def show_shortcuts_dialog(self) -> None:
         # Generated from the same tables that bind the keys, so the help can't drift.
-        rows = [(label, text) for _seqs, _fn, label, text in self._shortcut_table if label]
-        rows = self._KEYPRESS_HELP + rows
-        msg = (
-            "<h3>HakuView Keyboard & Mouse Shortcuts</h3>"
-            "<table cellpadding='4' style='font-size: 13px;'>"
-            + "".join(f"<tr><td><b>{html.escape(k)}</b></td><td>{html.escape(t)}</td></tr>" for k, t in rows)
-            + "</table>"
-        )
-        box = QMessageBox(self)
-        box.setWindowTitle("Keyboard Shortcuts — HakuView")
-        box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText(msg)
-        box.exec()
+        rows = self._KEYPRESS_HELP + [(label, text) for _seqs, _fn, label, text in self._shortcut_table if label]
+        dialogs.show_shortcuts_dialog(self, rows)
 
     def show_about_dialog(self) -> None:
-        full_license_text = (
-            "HakuView — MIT License\n\n"
-            "Copyright (c) 2026 Hakan Uysal (@hakanu_) / HakuView\n\n"
-            "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
-            "of this software and associated documentation files (the \"Software\"), to deal\n"
-            "in the Software without restriction, including without limitation the rights\n"
-            "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
-            "copies of the Software, and to permit persons to whom the Software is\n"
-            "furnished to do so, subject to the following conditions:\n\n"
-            "The above copyright notice and this permission notice shall be included in all\n"
-            "copies or substantial portions of the Software.\n\n"
-            "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
-            "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
-            "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
-            "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
-            "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
-            "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
-            "SOFTWARE.\n\n"
-            "--------------------------------------------------\n"
-            "Third-Party Open-Source Components & Licenses:\n"
-            "• Qt6 / PySide6: GNU Lesser General Public License v3 (LGPLv3)\n"
-            "• Pillow (PIL): Historical Permission Notice and Disclaimer (HPND / MIT-equivalent)\n"
-            "• FFmpeg (via Qt Multimedia): LGPL v2.1+ / GPL\n"
-        )
-
-        box = QMessageBox(self)
-        box.setWindowTitle(f"About {__app_name__}")
-        box.setTextFormat(Qt.TextFormat.RichText)
-        box.setIconPixmap(QIcon(str(ensure_hakuview_ico())).pixmap(64, 64))
-        box.setText(
-            f"<h3>🦉 {__app_name__} <span style='font-size: 13px; color: #38bdf8;'>v{__version__}</span></h3>"
-            "<p>Fast, lightweight IrfanView-inspired image & video viewer for Ubuntu & Windows.</p>"
-            "<p><b>Features:</b> Instant middle-of-folder cycling, border crop, rotate, "
-            "1-click compression, hardware-accelerated video playback, and slideshows.</p>"
-            "<p><b>GitHub:</b> <a href='https://github.com/hakanu/hakuview' style='color: #38bdf8;'>github.com/hakanu/hakuview</a><br>"
-            "<b>Author / Twitter:</b> <a href='https://x.com/hakanu_' style='color: #38bdf8;'>x.com/hakanu_</a><br>"
-            "<b>License:</b> Released under the <b>MIT License</b>.</p>"
-        )
-        box.setDetailedText(full_license_text)
-        box.exec()
+        dialogs.show_about_dialog(self)

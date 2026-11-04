@@ -11,9 +11,11 @@ import tempfile
 import threading
 from typing import List, Optional, Tuple
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, JpegImagePlugin
 from PySide6.QtCore import QObject, QRect, QRunnable, QThreadPool, Qt, Signal
 from PySide6.QtGui import QImage, QImageReader, QImageWriter, QTransform
+
+from .formatting import human_size
 
 
 def load_qimage_fast(path: Path | str) -> Optional[QImage]:
@@ -136,40 +138,31 @@ def _qimage_to_pil(image: QImage) -> Image.Image:
     return pil_img
 
 
-def adjust_qimage_color(image: QImage, brightness: int, contrast: int) -> QImage:
-    """Adjust brightness and contrast of a QImage using an optimized 256-value LUT.
-
-    Args:
-        image: Source QImage.
-        brightness: Offset from -100 to 100 (0 is neutral).
-        contrast: Contrast factor from -100 to 100 (0 is neutral).
-    """
-    if brightness == 0 and contrast == 0:
-        return image
-
+def color_lut(brightness: int, contrast: int) -> List[int]:
+    """256-entry lookup table for brightness (-100..100) and contrast (-100..100), 0 = neutral."""
     c = max(-99, min(99, int(contrast))) * 2.55
     factor = (259.0 * (c + 255.0)) / (255.0 * (259.0 - c))
     b_offset = float(brightness) * 1.28
+    return [max(0, min(255, int(round(factor * (x - 128.0 + b_offset) + 128.0)))) for x in range(256)]
 
-    lut = [max(0, min(255, int(round(factor * (x - 128.0 + b_offset) + 128.0)))) for x in range(256)]
 
-    pil_img = _qimage_to_pil(image)
-    if pil_img.mode == "RGBA":
-        r, g, b, a = pil_img.split()
-        r = r.point(lut)
-        g = g.point(lut)
-        b = b.point(lut)
-        adj_pil = Image.merge("RGBA", (r, g, b, a))
-    elif pil_img.mode == "RGB":
-        adj_pil = pil_img.point(lut * 3)
-    else:
-        rgb = pil_img.convert("RGB")
-        adj_pil = rgb.point(lut * 3)
+_IDENTITY_LUT = list(range(256))
 
-    data = adj_pil.tobytes("raw", adj_pil.mode)
-    fmt = QImage.Format.Format_RGBA8888 if adj_pil.mode == "RGBA" else QImage.Format.Format_RGB888
-    bpl = adj_pil.width * (4 if adj_pil.mode == "RGBA" else 3)
-    return QImage(data, adj_pil.width, adj_pil.height, bpl, fmt).copy()
+
+def apply_color_lut(image: QImage, lut: List[int]) -> QImage:
+    """Map R, G and B through `lut` (alpha untouched). Fast enough for live video frames."""
+    rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    w, h = rgba.width(), rgba.height()
+    pil_img = Image.frombuffer("RGBA", (w, h), rgba.constBits(), "raw", "RGBA", rgba.bytesPerLine(), 1)
+    data = pil_img.point(lut * 3 + _IDENTITY_LUT).tobytes()
+    return QImage(data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+
+
+def adjust_qimage_color(image: QImage, brightness: int, contrast: int) -> QImage:
+    """Return `image` with brightness/contrast applied (the same image if both are 0)."""
+    if brightness == 0 and contrast == 0:
+        return image
+    return apply_color_lut(image, color_lut(brightness, contrast))
 
 
 def _next_variant_path(source_path: Path, tag: str, ext: str) -> Path:
@@ -184,6 +177,47 @@ def _next_variant_path(source_path: Path, tag: str, ext: str) -> Path:
         candidate = parent / f"{stem}_{tag}_{counter}{ext}"
         counter += 1
     return candidate
+
+
+class CompressionError(Exception):
+    """A compression preset can't produce a useful variant; the message is user-facing."""
+
+
+def _jpegtran_optimize(src_path: Path, out_path: Path) -> None:
+    """Truly lossless JPEG re-pack (optimized Huffman tables + progressive), keeping metadata."""
+    jpegtran = shutil.which("jpegtran")
+    if not jpegtran:
+        raise CompressionError(
+            "Lossless JPEG optimization needs the 'jpegtran' tool, which isn't installed.\n\n"
+            "Ubuntu/Debian:  sudo apt install libjpeg-turbo-progs\n"
+            "Windows:  install libjpeg-turbo and add jpegtran to PATH.\n\n"
+            "Re-encoding instead would lose quality, so no variant was saved."
+        )
+    # -copy all keeps EXIF (notably Orientation, so the variant isn't shown rotated).
+    res = subprocess.run(
+        [jpegtran, "-copy", "all", "-optimize", "-progressive", "-outfile", str(out_path), str(src_path)],
+        check=False,
+        capture_output=True,
+    )
+    if res.returncode != 0 or not out_path.exists():
+        out_path.unlink(missing_ok=True)
+        err = res.stderr.decode("utf-8", errors="replace").strip()[-300:]
+        raise CompressionError(f"jpegtran failed:\n{err}")
+
+
+def _save_jpeg_like_source(image: Image.Image, src_path: Path, out_path: Path) -> None:
+    """Encode `image` as JPEG with the same quantization tables/subsampling as `src_path`."""
+    kwargs: dict = {"quality": 95}
+    try:
+        with Image.open(src_path) as src:
+            if src.format == "JPEG":
+                kwargs = {"qtables": src.quantization}
+                sampling = JpegImagePlugin.get_sampling(src)
+                if sampling >= 0:
+                    kwargs["subsampling"] = sampling
+    except OSError:
+        pass
+    image.convert("RGB").save(str(out_path), format="JPEG", optimize=True, progressive=True, **kwargs)
 
 
 COMPRESSION_MODES = [
@@ -242,21 +276,12 @@ def compress_image_as_variant(
         # Default: "lossless" (same format or PNG for raw bitmaps)
         if orig_ext in (".jpg", ".jpeg"):
             out_path = _next_variant_path(src_path, "lossless", orig_ext)
-            jpegtran = shutil.which("jpegtran")
-            if not doc.modified and jpegtran:
-                res = subprocess.run(
-                    [jpegtran, "-copy", "none", "-optimize", "-progressive", "-outfile", str(out_path), str(src_path)],
-                    check=False,
-                    capture_output=True,
-                )
-                if res.returncode != 0 or not out_path.exists():
-                    pil_img.convert("RGB").save(
-                        str(out_path), format="JPEG", quality=95, optimize=True, progressive=True, subsampling=0
-                    )
+            if doc.modified:
+                # Edited pixels have to be re-encoded; reuse the source's quantization tables and
+                # chroma subsampling so the variant keeps the original quality instead of inflating it.
+                _save_jpeg_like_source(pil_img, src_path, out_path)
             else:
-                pil_img.convert("RGB").save(
-                    str(out_path), format="JPEG", quality=95, optimize=True, progressive=True, subsampling=0
-                )
+                _jpegtran_optimize(src_path, out_path)
         elif orig_ext == ".webp":
             out_path = _next_variant_path(src_path, "lossless", ".webp")
             out_img = pil_img if has_alpha else pil_img.convert("RGB")
@@ -272,6 +297,15 @@ def compress_image_as_variant(
             out_img.save(str(out_path), format="PNG", optimize=True, compress_level=9)
 
     new_bytes = out_path.stat().st_size if out_path.exists() else 0
+    if orig_bytes and new_bytes >= orig_bytes:
+        # A "compressed" copy that is larger than the original is useless; don't leave it behind.
+        out_path.unlink(missing_ok=True)
+        label = dict((mode_id, name) for name, mode_id in COMPRESSION_MODES).get(mode, mode)
+        raise CompressionError(
+            f"{label} would not make this file smaller "
+            f"({human_size(orig_bytes)} → {human_size(new_bytes)}), so no variant was saved.\n\n"
+            "The image is probably already well compressed. Try a different preset."
+        )
     return out_path, orig_bytes, new_bytes
 
 
