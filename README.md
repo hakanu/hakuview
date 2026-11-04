@@ -38,27 +38,37 @@ Open any image or video from the middle of a folder—or pick one at random—an
 
 ## 🚀 Installation & Updates
 
-### Ubuntu / Linux
+## 🚀 1-Liner Install & Run with `uv`
 
+### Install globally (Ubuntu & Windows)
 ```bash
-# 1. Clone the repository and install globally as an isolated CLI & GUI app via uv (or pipx)
-git clone <repo-url> hakuview
-cd hakuview
-uv tool install --python 3.13 --editable .
-# (Alternatively with pipx: pipx install .)
+uv tool install git+https://github.com/hakanu/hakuview.git && hakuview --install-desktop
+```
+> **What this does in 2 seconds:**
+> 1. Installs `hakuview` in an isolated virtualenv using your local Qt runtime.
+> 2. Puts the `hakuview` CLI command in your `PATH`.
+> 3. Registers the desktop launcher and adds **"Open with HakuView"** to your right-click context menu (Nautilus on Ubuntu / Windows Explorer).
 
-# 2. Register Desktop Launcher & "Open with HakuView" right-click menu in Files (Nautilus)
-hakuview --install-desktop
+### Run instantly without installing
+```bash
+uvx --from git+https://github.com/hakanu/hakuview.git hakuview ~/Pictures
 ```
 
-### Windows (PowerShell / CMD)
+### Self-Update
+```bash
+uv tool upgrade hakuview
+# or simply:
+hakuview --update
+```
 
-```powershell
-# 1. Install via uv or pipx
-uv tool install --python 3.13 .\hakuview
-# (or: pipx install .\hakuview)
+---
 
-# 2. Add "Open with HakuView" to Windows Explorer right-click menu (no Admin required)
+## 🛠 Manual Installation (From Source)
+
+```bash
+git clone https://github.com/hakanu/hakuview.git
+cd hakuview
+uv tool install --editable .
 hakuview --install-desktop
 ```
 
