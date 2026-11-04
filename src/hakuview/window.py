@@ -170,6 +170,7 @@ class HakuViewWindow(QMainWindow):
         self.canvas.selectionChanged.connect(self._on_selection_changed)
         self.canvas.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
+        self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
 
         # Compact Top Toolbar
         self.toolbar = QToolBar("Main Toolbar", self)
@@ -811,6 +812,11 @@ class HakuViewWindow(QMainWindow):
     def _on_video_finished_in_slideshow(self) -> None:
         if self.slideshow_active:
             self.next_item()
+
+    def _on_video_transcoded(self, new_mp4_path: Path) -> None:
+        self.navigator.load_target(new_mp4_path)
+        self._display_current_file()
+        self.status.showMessage(f"Transcoded to {new_mp4_path.name} and playing full video!", 5000)
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():

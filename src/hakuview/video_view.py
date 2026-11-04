@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shutil
+import subprocess
 from typing import Optional
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -28,11 +31,81 @@ def _format_ms(ms: int) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def detect_video_codec(path: Path) -> Optional[str]:
+    """Rapidly probe video stream codec name (e.g. 'av1', 'vp9', 'h264') using ffprobe."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        res = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        return res.stdout.strip().lower() or None
+    except Exception:
+        return None
+
+
+class _TranscodeWorker(QObject):
+    finished = Signal(Path)
+    failed = Signal(str)
+
+    def __init__(self, src_path: Path, dest_path: Path) -> None:
+        super().__init__()
+        self.src_path = src_path
+        self.dest_path = dest_path
+
+    def run(self) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.failed.emit("ffmpeg is not installed on this system.")
+            return
+        try:
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(self.src_path),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "22",
+                "-c:a",
+                "copy",
+                str(self.dest_path),
+            ]
+            res = subprocess.run(cmd, capture_output=True, check=False)
+            if res.returncode == 0 and self.dest_path.exists():
+                self.finished.emit(self.dest_path)
+            else:
+                err_msg = res.stderr.decode("utf-8", errors="replace")[-300:]
+                self.failed.emit(f"Transcoding failed:\n{err_msg}")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class VideoPlayerWidget(QWidget):
-    """Embedded video player with transport controls and keyboard-friendly pass-through."""
+    """Embedded video player with transport controls, AV1 compatibility banner, and transcode tool."""
 
     videoFinished = Signal()
     doubleClicked = Signal()
+    transcodeCompleted = Signal(Path)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -120,9 +193,52 @@ class VideoPlayerWidget(QWidget):
         self.speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         bar_layout.addWidget(self.speed_combo)
 
+        # AV1 compatibility banner
+        self.banner = QWidget(self)
+        self.banner.setVisible(False)
+        self.banner.setStyleSheet(
+            """
+            QWidget {
+                background-color: #2e1515;
+                border-bottom: 1px solid #7f1d1d;
+                color: #fecaca;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #ef4444;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 3px 10px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #dc2626;
+            }
+            QPushButton:disabled {
+                background-color: #4b5563;
+                color: #9ca3af;
+            }
+            """
+        )
+        banner_layout = QHBoxLayout(self.banner)
+        banner_layout.setContentsMargins(12, 6, 12, 6)
+        self.lbl_banner = QLabel("⚠️ AV1 video stream: playing audio only (GPU lacks hardware AV1 decoder).", self.banner)
+        self.btn_transcode = QPushButton("⚡ Convert to MP4 (H.264)", self.banner)
+        self.btn_transcode.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_transcode.clicked.connect(self._on_transcode_clicked)
+        banner_layout.addWidget(self.lbl_banner, stretch=1)
+        banner_layout.addWidget(self.btn_transcode)
+
+        self._current_path: Optional[Path] = None
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[_TranscodeWorker] = None
+
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
+        root_layout.addWidget(self.banner)
         root_layout.addWidget(self.video_widget, stretch=1)
         root_layout.addWidget(self.controls_bar)
 
@@ -133,12 +249,59 @@ class VideoPlayerWidget(QWidget):
         self.player.mediaStatusChanged.connect(self._on_media_status_changed)
 
     def load_video(self, path: Path, slideshow_active: bool = False) -> None:
+        self._current_path = path
         self._in_slideshow = slideshow_active
+
+        # Check for AV1 streams in WebM files
+        if path.suffix.lower() in (".webm", ".mkv"):
+            codec = detect_video_codec(path)
+            if codec == "av1":
+                self.lbl_banner.setText("⚠️ AV1 video stream: playing audio only (GPU lacks hardware AV1 decoder).")
+                self.btn_transcode.setEnabled(True)
+                self.btn_transcode.setText("⚡ Convert to MP4 (H.264)")
+                self.banner.setVisible(True)
+            else:
+                self.banner.setVisible(False)
+        else:
+            self.banner.setVisible(False)
+
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self.player.play()
 
+    def _on_transcode_clicked(self) -> None:
+        if self._current_path is None:
+            return
+        dest_path = self._current_path.parent / f"{self._current_path.stem}.mp4"
+        counter = 2
+        while dest_path.exists():
+            dest_path = self._current_path.parent / f"{self._current_path.stem}_{counter}.mp4"
+            counter += 1
+
+        self.btn_transcode.setEnabled(False)
+        self.btn_transcode.setText("⏳ Converting...")
+
+        self._thread = QThread()
+        self._worker = _TranscodeWorker(self._current_path, dest_path)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_transcode_success)
+        self._worker.failed.connect(self._on_transcode_failed)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
+        self._thread.start()
+
+    def _on_transcode_success(self, new_path: Path) -> None:
+        self.banner.setVisible(False)
+        self.transcodeCompleted.emit(new_path)
+
+    def _on_transcode_failed(self, error: str) -> None:
+        self.lbl_banner.setText(f"❌ {error}")
+        self.btn_transcode.setEnabled(True)
+        self.btn_transcode.setText("Retry")
+
     def stop(self) -> None:
+        self.banner.setVisible(False)
         self.player.stop()
         self.player.setSource(QUrl())
 
