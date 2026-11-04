@@ -542,3 +542,170 @@ def test_video_color_scaling_and_frame_save(tmp_path: Path, qtbot) -> None:
     assert saved_frame_path.exists()
     assert "frame_" in saved_frame_path.name
     assert "color" in saved_frame_path.name
+
+
+def _show_active(win: HakuViewWindow, qtbot) -> None:
+    # Window-wide QAction shortcuts only fire for the active window.
+    win.show()
+    win.activateWindow()
+    qtbot.waitUntil(win.isActiveWindow)
+
+
+def _video_window(tmp_path: Path, qtbot) -> HakuViewWindow:
+    vid_path = tmp_path / "clip.mp4"
+    vid_path.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    win = HakuViewWindow(initial_path=vid_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+    _show_active(win, qtbot)
+    return win
+
+
+def test_zoom_shortcuts_step_instead_of_collapsing(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtTest import QTest
+
+    _create_sample_image(tmp_path / "img1.png", width=400, height=300)
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    _show_active(win, qtbot)
+    start = win.canvas.zoom_scale
+
+    # Regression: triggered(bool) used to be passed as zoom_in(factor=False) -> 2% zoom, and zoom_out crashed.
+    QTest.keyClick(win, Qt.Key.Key_Plus)
+    assert win.canvas.zoom_scale == pytest.approx(start * 1.25)
+    QTest.keyClick(win, Qt.Key.Key_Minus)
+    assert win.canvas.zoom_scale == pytest.approx(start)
+
+
+def test_video_trim_keys_are_not_stolen_by_global_shortcuts(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtTest import QTest
+
+    win = _video_window(tmp_path, qtbot)
+    calls = []
+    monkeypatch.setattr(win, "open_file_dialog", lambda: calls.append("open"))
+    monkeypatch.setattr(win.video_view, "set_trim_in", lambda *a: calls.append("in"))
+    monkeypatch.setattr(win.video_view, "set_trim_out", lambda *a: calls.append("out"))
+    interval = win.spin_interval.value()
+
+    for key in (Qt.Key.Key_I, Qt.Key.Key_O, Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight):
+        QTest.keyClick(win, key)
+
+    assert calls == ["in", "out", "in", "out"]
+    assert win.spin_interval.value() == interval
+
+
+def test_bracket_keys_change_slideshow_speed_for_images(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtTest import QTest
+
+    _create_sample_image(tmp_path / "img1.png")
+    win = HakuViewWindow(initial_path=tmp_path / "img1.png")
+    qtbot.addWidget(win)
+    _show_active(win, qtbot)
+
+    QTest.keyClick(win, Qt.Key.Key_BracketLeft)
+    assert win.spin_interval.value() == pytest.approx(2.5)
+    QTest.keyClick(win, Qt.Key.Key_BracketRight)
+    assert win.spin_interval.value() == pytest.approx(3.0)
+
+
+def test_shortcuts_dialog_lists_every_documented_key(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    win = HakuViewWindow()
+    qtbot.addWidget(win)
+    shown = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()))
+    win.show_shortcuts_dialog()
+
+    assert len(shown) == 1
+    for label in ("Ctrl+Shift+S", "[ / ]", "← / →", "Esc"):
+        assert label in shown[0]
+
+
+def test_media_info_reads_exif_sub_ifd(tmp_path: Path) -> None:
+    from PIL import ExifTags, Image
+    from hakuview.info_dialog import extract_media_info
+
+    exif = Image.Exif()
+    exif[0x010F] = "Canon"  # Make (IFD0)
+    exif.get_ifd(ExifTags.IFD.Exif)[0x8827] = 400  # ISOSpeedRatings (Exif sub-IFD)
+    img_path = tmp_path / "photo.jpg"
+    Image.new("RGB", (16, 16)).save(img_path, exif=exif)
+
+    info = extract_media_info(img_path)
+    assert info["exif"]["Make"] == "Canon"
+    assert info["exif"]["ISOSpeedRatings"] == "400"
+
+
+def test_save_refuses_to_flatten_animated_gif(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PIL import Image
+    from PySide6.QtWidgets import QMessageBox
+
+    gif_path = tmp_path / "anim.gif"
+    frames = [Image.new("RGB", (20, 20), color) for color in ("red", "blue", "green")]
+    frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
+    original = gif_path.read_bytes()
+
+    win = HakuViewWindow(initial_path=gif_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a))
+
+    win.rotate_right()
+    assert not win.save_current()
+    assert len(warnings) == 1
+    assert gif_path.read_bytes() == original
+
+
+def test_invalid_media_advances_slideshow_once_and_never_loops(qtbot) -> None:
+    from PySide6.QtMultimedia import QMediaPlayer
+    from hakuview.video_view import VideoPlayerWidget
+
+    widget = VideoPlayerWidget()
+    qtbot.addWidget(widget)
+    finished = []
+    widget.videoFinished.connect(lambda: finished.append(True))
+
+    # Outside slideshow: an unplayable file must not be replayed.
+    plays = []
+    widget.player.play = lambda: plays.append(True)
+    widget._on_media_status_changed(QMediaPlayer.MediaStatus.InvalidMedia)
+    assert plays == [] and finished == []
+
+    # In slideshow: InvalidMedia + errorOccurred for the same file advance only once.
+    widget._in_slideshow = True
+    widget._on_media_status_changed(QMediaPlayer.MediaStatus.InvalidMedia)
+    widget._on_player_error(QMediaPlayer.Error.FormatError, "bad file")
+    assert finished == [True]
+
+
+def test_only_one_ffmpeg_job_runs_and_shutdown_cancels_it(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import shutil
+    from PySide6.QtWidgets import QMessageBox
+    from hakuview.video_view import VideoPlayerWidget, _TrimWorker
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+
+    widget = VideoPlayerWidget()
+    qtbot.addWidget(widget)
+    busy = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: busy.append(a))
+
+    # An endless synthetic input keeps ffmpeg busy until it is cancelled.
+    class _EndlessJob(_TrimWorker):
+        def _attempts(self, ffmpeg):
+            return [([ffmpeg, "-y", "-re", "-f", "lavfi", "-i", "testsrc", str(self.dest_path)], 0)]
+
+    dest = tmp_path / "out.mp4"
+    assert widget._start_job(_EndlessJob(dest, dest, 0, 1), lambda p: None, lambda e: None)
+    assert widget.is_job_running()
+    assert not widget._start_job(_EndlessJob(dest, dest, 0, 1), lambda p: None, lambda e: None)
+    assert len(busy) == 1
+
+    thread = widget._job_thread
+    widget.shutdown()
+    assert not widget.is_job_running()
+    assert thread.isFinished()
+    assert not dest.exists()

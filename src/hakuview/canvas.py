@@ -8,6 +8,7 @@ from typing import Optional
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
     QImage,
@@ -27,7 +28,6 @@ class ImageCanvas(QWidget):
 
     zoomChanged = Signal(float)
     selectionChanged = Signal(QRect)  # Emitted in image pixel coordinates
-    cropRequested = Signal(QRect)
     doubleClicked = Signal()
 
     HANDLE_RADIUS = 6
@@ -53,6 +53,7 @@ class ImageCanvas(QWidget):
         self._space_pressed: bool = False
         self._show_info_overlay: bool = False
         self._info_text: str = ""
+        self._checker_brush: Optional[QBrush] = None
 
     # ------------------------------------------------------------------
     # Image & Movie management
@@ -271,19 +272,23 @@ class ImageCanvas(QWidget):
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, msg)
 
     def _draw_checkerboard(self, painter: QPainter, rect: QRectF) -> None:
+        # Only paint the visible part of the image; at high zoom `rect` can be
+        # hundreds of thousands of pixels wide. A texture brush tiles natively.
+        visible = rect.intersected(QRectF(self.rect()))
+        if visible.isEmpty():
+            return
+        if self._checker_brush is None:
+            tile = 12
+            pattern = QPixmap(tile * 2, tile * 2)
+            pattern.fill(QColor(42, 44, 48))
+            p = QPainter(pattern)
+            p.fillRect(tile, 0, tile, tile, QColor(58, 60, 66))
+            p.fillRect(0, tile, tile, tile, QColor(58, 60, 66))
+            p.end()
+            self._checker_brush = QBrush(pattern)
         painter.save()
-        painter.setClipRect(rect)
-        tile = 12
-        c1 = QColor(42, 44, 48)
-        c2 = QColor(58, 60, 66)
-        left = int(rect.left())
-        top = int(rect.top())
-        right = int(rect.right()) + 1
-        bottom = int(rect.bottom()) + 1
-        for y in range(top, bottom, tile):
-            for x in range(left, right, tile):
-                is_even = ((x - left) // tile + (y - top) // tile) % 2 == 0
-                painter.fillRect(x, y, tile, tile, c1 if is_even else c2)
+        painter.setBrushOrigin(rect.topLeft())
+        painter.fillRect(visible, self._checker_brush)
         painter.restore()
 
     def _draw_selection_overlay(self, painter: QPainter, image_rect: QRectF) -> None:

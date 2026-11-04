@@ -99,11 +99,11 @@ uv run pytest -v
 
 ## 👤 Author
 
-- **Hakan Ünal** ([@hakanu_](https://x.com/hakanu_))
+- **Hakan Uysal** ([@hakanu_](https://x.com/hakanu_))
 - GitHub: [hakanu/hakuview](https://github.com/hakanu/hakuview)
 
 ---
 
 ## 📄 License
 
-[MIT](LICENSE) © 2026 Hakan Ünal
+[MIT](LICENSE) © 2026 Hakan Uysal

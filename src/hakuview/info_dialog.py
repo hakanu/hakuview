@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from PIL import ExifTags, Image
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -29,16 +29,8 @@ from PySide6.QtWidgets import (
 
 from . import __app_name__
 from .folder_scanner import is_video_file
+from .formatting import human_size
 from .installer import ensure_hakuview_ico
-
-
-def _human_size(num_bytes: int) -> str:
-    val = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if val < 1024.0 or unit == "TB":
-            return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} B"
-        val /= 1024.0
-    return f"{val:.1f} B"
 
 
 def _format_bitrate(bps: Optional[float | int | str]) -> str:
@@ -103,7 +95,7 @@ def extract_media_info(path: Path) -> Dict[str, Any]:
         "file_name": path.name,
         "file_path": str(path),
         "file_size": file_size,
-        "file_size_human": _human_size(file_size),
+        "file_size_human": human_size(file_size),
         "is_video": is_vid,
         "modified_time": datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
         "raw_json": None,
@@ -215,7 +207,7 @@ def extract_media_info(path: Path) -> Dict[str, Any]:
                 # Compression metrics
                 raw_bytes = w * h * max(1, bands)
                 info["raw_memory_bytes"] = raw_bytes
-                info["raw_memory_str"] = _human_size(raw_bytes)
+                info["raw_memory_str"] = human_size(raw_bytes)
                 if file_size > 0:
                     ratio = raw_bytes / file_size
                     savings = max(0.0, (1.0 - (file_size / raw_bytes)) * 100)
@@ -228,7 +220,10 @@ def extract_media_info(path: Path) -> Dict[str, Any]:
                 exif_data = {}
                 raw_exif = im.getexif()
                 if raw_exif:
-                    for tag_id, value in raw_exif.items():
+                    # Camera settings (exposure, ISO, lens, DateTimeOriginal...) live in the
+                    # Exif sub-IFD, not the top-level IFD0 that getexif() iterates.
+                    exif_items = {**raw_exif, **raw_exif.get_ifd(ExifTags.IFD.Exif)}
+                    for tag_id, value in exif_items.items():
                         tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
                         if isinstance(value, bytes):
                             try:

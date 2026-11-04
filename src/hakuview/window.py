@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-import os
+import html
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSettings, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -45,28 +45,21 @@ from PySide6.QtWidgets import (
 
 from . import __app_name__, __version__
 from .canvas import ImageCanvas
-from .folder_scanner import FolderNavigator, is_image_file, is_video_file
+from .folder_scanner import SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
 from .image_ops import (
     COMPRESSION_MODES,
     ImageDocument,
     ImagePreloadCache,
     adjust_qimage_color,
     compress_image_as_variant,
+    is_animated_image,
     _next_variant_path,
     save_qimage_atomic,
 )
+from .formatting import human_size
 from .installer import ensure_hakuview_ico
 from .info_dialog import MediaInfoDialog
 from .video_view import VideoPlayerWidget, _format_ms
-
-
-def _human_size(num_bytes: int) -> str:
-    val = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if val < 1024.0 or unit == "GB":
-            return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} B"
-        val /= 1024.0
-    return f"{val:.1f} GB"
 
 
 def _create_three_dots_icon(color: QColor = QColor("#e2e8f0"), size: int = 24) -> QIcon:
@@ -97,12 +90,7 @@ class HakuViewWindow(QMainWindow):
         start_fullscreen: bool = False,
     ) -> None:
         super().__init__()
-        self.setWindowTitle(__app_name__)
-        self.setWindowIcon(QIcon(str(ensure_hakuview_ico())))
-        self.resize(1180, 780)
-        self.setAcceptDrops(True)
 
-        self.settings = QSettings("HakuView", "HakuView")
         self.navigator = FolderNavigator()
         self.cache = ImagePreloadCache(max_items=10)
         self.document: Optional[ImageDocument] = None
@@ -119,9 +107,16 @@ class HakuViewWindow(QMainWindow):
         self.slideshow_timer = QTimer(self)
         self.slideshow_timer.timeout.connect(self._on_slideshow_tick)
 
+        self._toolbar_ext: Optional[QToolButton] = None
+
         self._apply_dark_theme()
         self._build_ui()
         self._build_shortcuts()
+
+        self.setWindowTitle(__app_name__)
+        self.setWindowIcon(QIcon(str(ensure_hakuview_ico())))
+        self.resize(1180, 780)
+        self.setAcceptDrops(True)
 
         if initial_path is not None:
             self.open_path(Path(initial_path), pick_random=pick_random)
@@ -587,7 +582,7 @@ class HakuViewWindow(QMainWindow):
 
         self.btn_reset_color = QPushButton("↺ Reset", self.color_bar)
         self.btn_reset_color.setToolTip("Reset brightness & contrast back to 0")
-        self.btn_reset_color.clicked.connect(self.reset_color_adjustments)
+        self.btn_reset_color.clicked.connect(lambda: self.reset_color_adjustments())
         cb_layout.addWidget(self.btn_reset_color)
 
         self.btn_save_color = QPushButton("💾 Save as New Image", self.color_bar)
@@ -607,12 +602,9 @@ class HakuViewWindow(QMainWindow):
 
     def toggle_color_bar(self) -> None:
         """Toggle visibility of the Color Scaling adjustment bar."""
-        if not hasattr(self, "color_bar"):
-            return
         is_vis = self.color_bar.isVisible()
         self.color_bar.setVisible(not is_vis)
-        if hasattr(self, "btn_color"):
-            self.btn_color.setChecked(not is_vis)
+        self.btn_color.setChecked(not is_vis)
         if not is_vis:
             self.slider_brightness.setFocus()
 
@@ -640,15 +632,14 @@ class HakuViewWindow(QMainWindow):
         """Reset brightness and contrast sliders back to 0."""
         self.color_brightness = 0
         self.color_contrast = 0
-        if hasattr(self, "slider_brightness"):
-            self.slider_brightness.blockSignals(True)
-            self.slider_contrast.blockSignals(True)
-            self.slider_brightness.setValue(0)
-            self.slider_contrast.setValue(0)
-            self.slider_brightness.blockSignals(False)
-            self.slider_contrast.blockSignals(False)
-            self.lbl_b_val.setText("0")
-            self.lbl_c_val.setText("0")
+        self.slider_brightness.blockSignals(True)
+        self.slider_contrast.blockSignals(True)
+        self.slider_brightness.setValue(0)
+        self.slider_contrast.setValue(0)
+        self.slider_brightness.blockSignals(False)
+        self.slider_contrast.blockSignals(False)
+        self.lbl_b_val.setText("0")
+        self.lbl_c_val.setText("0")
 
         if update_view:
             if self.current_is_video:
@@ -710,174 +701,153 @@ class HakuViewWindow(QMainWindow):
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setToolTip(tooltip)
         btn.setCheckable(checkable)
-        btn.clicked.connect(slot)
+        btn.clicked.connect(lambda _checked=False: slot())
         self.toolbar.addWidget(btn)
         return btn
 
     def _build_shortcuts(self) -> None:
-        # File & Folder actions
-        self._add_action("Open", "O", self.open_file_dialog)
-        self._add_action("OpenCtrl", "Ctrl+O", self.open_file_dialog)
-        self._add_action("CloseWindow", "Ctrl+W", self.close)
-        self._add_action("QuitApp", "Ctrl+Q", self.close)
-        self._add_action("Save", "Ctrl+S", self.save_current)
-        self._add_action("SaveAs", "Ctrl+Shift+S", self.save_as_dialog)
-        self._add_action("Undo", "Ctrl+Z", self.undo_edit)
-        self._add_action("RandomFile", "Ctrl+M", self.random_item)
-        self._add_action("DeleteFile", "Delete", self.delete_current_file)
-        self._add_action("MediaInfoCtrlI", "Ctrl+I", self.show_media_info_dialog)
-        self._add_action("InfoHUD", "Shift+I", self.toggle_info_overlay)
+        # Every key is bound in exactly one place. Letter/symbol commands live here as
+        # window-wide QActions; keys that a focused widget (slider, spin box) may need to
+        # consume itself — arrows, Home/End, Page Up/Down, Space, Enter, Esc — are handled
+        # in keyPressEvent, which Qt only reaches when the focused widget ignores the key.
+        # Context-dependent keys (I, O, [, ], T, M) dispatch on image vs. video mode.
+        self._shortcut_table = [
+            (("O", "Ctrl+O"), self._on_key_o, "O / Ctrl+O", "Open file (O marks video Out-point)"),
+            (("Ctrl+W", "Ctrl+Q"), self.close, "Ctrl+W / Ctrl+Q", "Close window"),
+            (("Ctrl+S",), self.save_current, "Ctrl+S", "Save changes (atomic in-place)"),
+            (("Ctrl+Shift+S",), self.save_as_dialog, "Ctrl+Shift+S", "Save As..."),
+            (("Ctrl+Z",), self.undo_edit, "Ctrl+Z", "Undo last edit"),
+            (("Ctrl+M",), self.random_item, "Ctrl+M", "Jump to random file in folder"),
+            (("I", "Ctrl+I"), self._on_key_i, "I / Ctrl+I", "Media Inspector (I marks video In-point)"),
+            (("Shift+I",), self.toggle_info_overlay, "Shift+I", "Toggle info HUD overlay"),
+            (("R",), self.rotate_right, "R / L", "Rotate 90° Right / Left"),
+            (("L",), self.rotate_left, None, None),
+            (("H",), self.flip_horizontal, "H / V", "Flip Horizontal / Vertical"),
+            (("V",), self.flip_vertical, None, None),
+            (("C",), self.trigger_crop_action, "C", "Border Crop (drag borders, then C or Enter)"),
+            (("Ctrl+Y",), self.apply_crop, "Ctrl+Y", "Apply crop selection"),
+            (("B",), self.toggle_color_bar, "B", "Brightness / Contrast panel"),
+            (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress & save as variant"),
+            (("W", "F5"), self.toggle_slideshow, "W / F5", "Toggle Slideshow"),
+            (("[",), self._on_key_bracket_left, "[ / ]", "Video: mark In / Out — Images: slideshow faster / slower"),
+            (("]",), self._on_key_bracket_right, None, None),
+            (("T",), self._on_key_t, "T", "Export trimmed video clip (FFmpeg)"),
+            (("M",), self._on_key_m, "M", "Mute / unmute video"),
+            (("F", "F11"), self.toggle_fullscreen, "F / F11 / Double-Click", "Toggle Fullscreen"),
+            (("+", "="), self.canvas.zoom_in, "+ / - or Wheel", "Zoom (centered at mouse)"),
+            (("-",), self.canvas.zoom_out, None, None),
+            (("0",), self.canvas.zoom_fit, "0 / 1", "Fit to window / 100% 1:1 size"),
+            (("1",), self.canvas.zoom_actual, None, None),
+            (("Ctrl+A",), self.canvas.select_all, "Ctrl+A", "Select whole image for cropping"),
+        ]
+        for sequences, handler, _keys_label, _help in self._shortcut_table:
+            act = QAction(self)
+            act.setShortcuts([QKeySequence(seq) for seq in sequences])
+            # Call without arguments: triggered(bool) would otherwise be passed into
+            # handlers with default parameters (e.g. zoom_in(factor=False)).
+            act.triggered.connect(lambda _checked=False, fn=handler: fn())
+            self.addAction(act)
 
-        # Image transformations (IrfanView keybindings)
-        self._add_action("RotateRight", "R", self.rotate_right)
-        self._add_action("RotateLeft", "L", self.rotate_left)
-        self._add_action("FlipH", "H", self.flip_horizontal)
-        self._add_action("FlipV", "V", self.flip_vertical)
-        self._add_action("CropC", "C", self.trigger_crop_action)
-        self._add_action("CropIrfan", "Ctrl+Y", self.apply_crop)
-        self._add_action("ColorAdjustB", "B", self.toggle_color_bar)
-        self._add_action("CompressK", "K", self.compress_current_variant)
-        self._add_action("CompressCtrlK", "Ctrl+K", self.compress_current_variant)
+    _KEYPRESS_HELP = [
+        ("← / →", "Previous / Next file in folder (Shift: seek video ±5 s)"),
+        ("Home / End, PgUp / PgDn", "First / Last file, Previous / Next file"),
+        ("Space or Click", "Play / Pause video (hold Space + drag to pan image)"),
+        ("Enter", "Apply crop selection, otherwise toggle fullscreen"),
+        ("Esc", "Close panel / clear trim or crop / stop slideshow / exit fullscreen"),
+    ]
 
-        # Slideshow
-        self._add_action("SlideshowW", "W", self.toggle_slideshow)
-        self._add_action("SlideshowF5", "F5", self.toggle_slideshow)
-        self._add_action("FasterSlideshow", "[", lambda: self.spin_interval.setValue(max(0.5, self.spin_interval.value() - 0.5)))
-        self._add_action("SlowerSlideshow", "]", lambda: self.spin_interval.setValue(min(120.0, self.spin_interval.value() + 0.5)))
+    def _on_key_o(self) -> None:
+        if self.current_is_video:
+            self._mark_trim_out()
+        else:
+            self.open_file_dialog()
 
-        # Zoom & Fullscreen
-        self._add_action("FullscreenF", "F", self.toggle_fullscreen)
-        self._add_action("FullscreenF11", "F11", self.toggle_fullscreen)
-        self._add_action("ZoomInPlus", "+", self.canvas.zoom_in)
-        self._add_action("ZoomInEqual", "=", self.canvas.zoom_in)
-        self._add_action("ZoomOutMinus", "-", self.canvas.zoom_out)
-        self._add_action("ZoomFit0", "0", self.canvas.zoom_fit)
-        self._add_action("ZoomActual1", "1", self.canvas.zoom_actual)
-        self._add_action("SelectAll", "Ctrl+A", self.canvas.select_all)
+    def _on_key_i(self) -> None:
+        ctrl_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        if self.current_is_video and not ctrl_held:
+            self._mark_trim_in()
+        else:
+            self.show_media_info_dialog()
 
-    def _add_action(self, name: str, shortcut: str, slot) -> QAction:
-        act = QAction(name, self)
-        act.setShortcut(QKeySequence(shortcut))
-        act.triggered.connect(slot)
-        self.addAction(act)
-        return act
+    def _on_key_bracket_left(self) -> None:
+        if self.current_is_video:
+            self._mark_trim_in()
+        else:
+            self.spin_interval.setValue(self.spin_interval.value() - 0.5)
+
+    def _on_key_bracket_right(self) -> None:
+        if self.current_is_video:
+            self._mark_trim_out()
+        else:
+            self.spin_interval.setValue(self.spin_interval.value() + 0.5)
+
+    def _on_key_t(self) -> None:
+        if self.current_is_video:
+            self.video_view.execute_trim()
+
+    def _on_key_m(self) -> None:
+        if self.current_is_video:
+            self.video_view.toggle_mute()
+
+    def _mark_trim_in(self) -> None:
+        self.video_view.set_trim_in()
+        self.status.showMessage(f"✂ Mark In: {_format_ms(self.video_view.trim_in_ms or 0)}", 3000)
+
+    def _mark_trim_out(self) -> None:
+        self.video_view.set_trim_out()
+        self.status.showMessage(f"✂ Mark Out: {_format_ms(self.video_view.trim_out_ms or 0)}", 3000)
 
     # ------------------------------------------------------------------
-    # Keyboard handling (Arrow keys, Space, Enter, Escape)
+    # Keyboard handling (keys a focused widget may consume first)
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
-        mods = event.modifiers()
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
 
-        # Left / Right Arrow keys ALWAYS cycle through the folder unless Shift is held during video playback
-        if key == Qt.Key.Key_Right:
-            if self.current_is_video and (mods & Qt.KeyboardModifier.ShiftModifier):
-                self.video_view.seek_relative_ms(5000)
-            else:
+        if key in (Qt.Key.Key_Right, Qt.Key.Key_Left):
+            forward = key == Qt.Key.Key_Right
+            if self.current_is_video and shift:
+                self.video_view.seek_relative_ms(5000 if forward else -5000)
+            elif forward:
                 self.next_item()
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_Left:
-            if self.current_is_video and (mods & Qt.KeyboardModifier.ShiftModifier):
-                self.video_view.seek_relative_ms(-5000)
             else:
                 self.prev_item()
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_Home:
+        elif key in (Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):
+            self.next_item() if key == Qt.Key.Key_PageDown else self.prev_item()
+        elif key == Qt.Key.Key_Home:
             self.first_item()
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_End:
+        elif key == Qt.Key.Key_End:
             self.last_item()
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_PageDown:
-            self.next_item()
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_PageUp:
-            self.prev_item()
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_Space:
+        elif key == Qt.Key.Key_Space:
             if self.current_is_video:
                 self.video_view.toggle_play_pause()
-            else:
-                if not event.isAutoRepeat():
-                    self.canvas.set_space_pressed(True)
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_M and self.current_is_video:
-            self.video_view.toggle_mute()
-            event.accept()
-            return
-
-        # Media Inspector Card (Ctrl+I anytime, or I for images)
-        if key == Qt.Key.Key_I:
-            if (mods & Qt.KeyboardModifier.ControlModifier) or not self.current_is_video:
-                self.show_media_info_dialog()
-                event.accept()
-                return
-
-        # Video Trimming shortcuts
-        if self.current_is_video:
-            if key in (Qt.Key.Key_BracketLeft, Qt.Key.Key_I):
-                self.video_view.set_trim_in()
-                in_ms = self.video_view.trim_in_ms or 0
-                self.status.showMessage(f"✂ Mark In: {_format_ms(in_ms)}", 3000)
-                event.accept()
-                return
-
-            if key in (Qt.Key.Key_BracketRight, Qt.Key.Key_O):
-                self.video_view.set_trim_out()
-                out_ms = self.video_view.trim_out_ms or 0
-                self.status.showMessage(f"✂ Mark Out: {_format_ms(out_ms)}", 3000)
-                event.accept()
-                return
-
-            if key == Qt.Key.Key_T:
-                self.video_view.execute_trim()
-                event.accept()
-                return
-
-        if key == Qt.Key.Key_B:
-            self.toggle_color_bar()
-            event.accept()
-            return
-
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            elif not event.isAutoRepeat():
+                self.canvas.set_space_pressed(True)
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self.current_is_video and not self.canvas.selection.isNull():
                 self.apply_crop()
             else:
                 self.toggle_fullscreen()
-            event.accept()
+        elif key == Qt.Key.Key_Escape:
+            self._on_escape()
+        else:
+            super().keyPressEvent(event)
             return
+        event.accept()
 
-        if key == Qt.Key.Key_Escape:
-            if hasattr(self, "color_bar") and self.color_bar.isVisible():
-                self.toggle_color_bar()
-            elif self.current_is_video and self.video_view.has_trim_points():
-                self.video_view.clear_trim()
-                self.status.showMessage("Trim markers cleared.", 2000)
-            elif not self.current_is_video and not self.canvas.selection.isNull():
-                self.canvas.clear_selection()
-            elif self.slideshow_active:
-                self.set_slideshow(False)
-            elif self.isFullScreen():
-                self.toggle_fullscreen()
-            event.accept()
-            return
-
-        super().keyPressEvent(event)
+    def _on_escape(self) -> None:
+        if self.color_bar.isVisible():
+            self.toggle_color_bar()
+        elif self.current_is_video and self.video_view.has_trim_points():
+            self.video_view.clear_trim()
+            self.status.showMessage("Trim markers cleared.", 2000)
+        elif not self.current_is_video and not self.canvas.selection.isNull():
+            self.canvas.clear_selection()
+        elif self.slideshow_active:
+            self.set_slideshow(False)
+        elif self.isFullScreen():
+            self.toggle_fullscreen()
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
@@ -914,7 +884,7 @@ class HakuViewWindow(QMainWindow):
             self,
             "Open Image or Video",
             start_dir,
-            "Media Files (*.jpg *.jpeg *.png *.webp *.bmp *.gif *.tiff *.tif *.ico *.svg *.avif *.heic *.mp4 *.mkv *.webm *.avi *.mov *.m4v *.wmv *.flv *.mpg *.mpeg);;All Files (*)",
+            f"Media Files ({' '.join('*' + ext for ext in sorted(SUPPORTED_EXTENSIONS))});;All Files (*)",
         )
         if file_path:
             self.open_path(Path(file_path))
@@ -932,59 +902,33 @@ class HakuViewWindow(QMainWindow):
             return False
         return self._display_current_file()
 
-    def next_item(self) -> Optional[Path]:
+    def _navigate(self, move) -> Optional[Path]:
+        """Run a FolderNavigator move (after the unsaved-changes prompt) and display the result."""
         if self.navigator.count == 0:
             return None
         if not self._confirm_discard_or_save():
             return self.navigator.current_file
-        target = (
-            self.navigator.random_file()
-            if (self.slideshow_active and self.slideshow_random)
-            else self.navigator.next(wrap=True)
-        )
+        target = move()
         if target is not None:
             self._display_current_file()
         return target
+
+    def next_item(self) -> Optional[Path]:
+        if self.slideshow_active and self.slideshow_random:
+            return self._navigate(self.navigator.random_file)
+        return self._navigate(self.navigator.next)
 
     def prev_item(self) -> Optional[Path]:
-        if self.navigator.count == 0:
-            return None
-        if not self._confirm_discard_or_save():
-            return self.navigator.current_file
-        target = self.navigator.prev(wrap=True)
-        if target is not None:
-            self._display_current_file()
-        return target
+        return self._navigate(self.navigator.prev)
 
     def first_item(self) -> Optional[Path]:
-        if self.navigator.count == 0:
-            return None
-        if not self._confirm_discard_or_save():
-            return self.navigator.current_file
-        target = self.navigator.first()
-        if target is not None:
-            self._display_current_file()
-        return target
+        return self._navigate(self.navigator.first)
 
     def last_item(self) -> Optional[Path]:
-        if self.navigator.count == 0:
-            return None
-        if not self._confirm_discard_or_save():
-            return self.navigator.current_file
-        target = self.navigator.last()
-        if target is not None:
-            self._display_current_file()
-        return target
+        return self._navigate(self.navigator.last)
 
     def random_item(self) -> Optional[Path]:
-        if self.navigator.count == 0:
-            return None
-        if not self._confirm_discard_or_save():
-            return self.navigator.current_file
-        target = self.navigator.random_file()
-        if target is not None:
-            self._display_current_file()
-        return target
+        return self._navigate(self.navigator.random_file)
 
     def _display_current_file(self) -> bool:
         self.reset_color_adjustments(update_view=False)
@@ -1037,33 +981,24 @@ class HakuViewWindow(QMainWindow):
     # Image Editing (Rotate, Flip, Crop, Undo, Save)
     # ------------------------------------------------------------------
 
-    def rotate_left(self) -> None:
+    def _apply_edit(self, operation, reset_view: bool) -> None:
         if self.document is None or self.current_is_video:
             return
-        self.document.rotate_left()
-        self.canvas.set_image(self.document.current, reset_view=True)
+        operation(self.document)
+        self.canvas.set_image(self.document.current, reset_view=reset_view)
         self._update_ui_state()
+
+    def rotate_left(self) -> None:
+        self._apply_edit(ImageDocument.rotate_left, reset_view=True)
 
     def rotate_right(self) -> None:
-        if self.document is None or self.current_is_video:
-            return
-        self.document.rotate_right()
-        self.canvas.set_image(self.document.current, reset_view=True)
-        self._update_ui_state()
+        self._apply_edit(ImageDocument.rotate_right, reset_view=True)
 
     def flip_horizontal(self) -> None:
-        if self.document is None or self.current_is_video:
-            return
-        self.document.flip_horizontal()
-        self.canvas.set_image(self.document.current, reset_view=False)
-        self._update_ui_state()
+        self._apply_edit(ImageDocument.flip_horizontal, reset_view=False)
 
     def flip_vertical(self) -> None:
-        if self.document is None or self.current_is_video:
-            return
-        self.document.flip_vertical()
-        self.canvas.set_image(self.document.current, reset_view=False)
-        self._update_ui_state()
+        self._apply_edit(ImageDocument.flip_vertical, reset_view=False)
 
     def trigger_crop_action(self) -> bool:
         """Toggle border crop handles with C (for image), or export trim (for video)."""
@@ -1130,6 +1065,15 @@ class HakuViewWindow(QMainWindow):
             return bool(self.save_adjusted_image())
         if self.document is None or self.current_is_video:
             return False
+        if is_animated_image(self.document.path):
+            # The document holds a single frame; writing it back would destroy the animation.
+            QMessageBox.warning(
+                self,
+                "Animated Image",
+                f"'{self.document.path.name}' is animated. Saving in place would keep only one frame.\n"
+                "Use Save As (Ctrl+Shift+S) to write the edited frame to a new file.",
+            )
+            return False
         try:
             save_qimage_atomic(self.document.current, self.document.path)
             self.cache.invalidate(self.document.path)
@@ -1185,9 +1129,9 @@ class HakuViewWindow(QMainWindow):
             if orig_bytes > 0:
                 diff_pct = ((new_bytes - orig_bytes) / orig_bytes) * 100.0
                 sign = "+" if diff_pct > 0 else ""
-                stats = f"{_human_size(orig_bytes)} → {_human_size(new_bytes)} ({sign}{diff_pct:.1f}%)"
+                stats = f"{human_size(orig_bytes)} → {human_size(new_bytes)} ({sign}{diff_pct:.1f}%)"
             else:
-                stats = _human_size(new_bytes)
+                stats = human_size(new_bytes)
 
             self.status.showMessage(f"Saved variant: {variant_path.name}  [{stats}]", 5500)
             return variant_path
@@ -1222,32 +1166,6 @@ class HakuViewWindow(QMainWindow):
             self.document.reset()
             return True
         return False
-
-    def delete_current_file(self) -> None:
-        current = self.navigator.current_file
-        if current is None:
-            return
-        reply = QMessageBox.question(
-            self,
-            "Delete File",
-            f"Permanently delete '{current.name}' from disk?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            if self.current_is_video:
-                self.video_view.stop()
-            current.unlink()
-            self.cache.invalidate(current)
-            if self.document is not None:
-                self.document.modified = False
-            self.navigator.remove_current_from_list()
-            self._display_current_file()
-            self.status.showMessage(f"Deleted {current.name}", 3000)
-        except OSError as exc:
-            QMessageBox.critical(self, "Delete Error", f"Could not delete {current}:\n{exc}")
 
     # ------------------------------------------------------------------
     # Slideshow & Fullscreen
@@ -1330,18 +1248,16 @@ class HakuViewWindow(QMainWindow):
             self.showNormal()
             self.toolbar.setVisible(True)
             self.status.setVisible(True)
-            if hasattr(self, "fs_overlay"):
-                self.fs_overlay.hide()
+            self.fs_overlay.hide()
         else:
             self.toolbar.setVisible(False)
             self.status.setVisible(False)
             self.showFullScreen()
-            if hasattr(self, "fs_overlay"):
-                self.fs_overlay.show()
-                self._position_fullscreen_overlay()
+            self.fs_overlay.show()
+            self._position_fullscreen_overlay()
 
     def _position_fullscreen_overlay(self) -> None:
-        if not hasattr(self, "fs_overlay") or not self.fs_overlay.isVisible():
+        if not self.fs_overlay.isVisible():
             return
         self.fs_overlay.adjustSize()
         w = self.fs_overlay.width()
@@ -1369,7 +1285,7 @@ class HakuViewWindow(QMainWindow):
             return ""
         try:
             st = cur.stat()
-            size_str = _human_size(st.st_size)
+            size_str = human_size(st.st_size)
             mtime_str = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         except OSError:
             size_str = "?"
@@ -1448,7 +1364,7 @@ class HakuViewWindow(QMainWindow):
         self.lbl_position.setText(idx_str)
 
         try:
-            fsize = _human_size(cur.stat().st_size)
+            fsize = human_size(cur.stat().st_size)
         except OSError:
             fsize = ""
         self.lbl_filename.setText(f"{cur.name}   ({fsize})" if fsize else cur.name)
@@ -1479,6 +1395,7 @@ class HakuViewWindow(QMainWindow):
             event.ignore()
             return
         self.video_view.stop()
+        self.video_view.shutdown()
         super().closeEvent(event)
 
     def showEvent(self, event) -> None:
@@ -1488,36 +1405,34 @@ class HakuViewWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._hook_toolbar_extension()
-        if hasattr(self, "fs_overlay") and self.isFullScreen():
+        if self.isFullScreen():
             self._position_fullscreen_overlay()
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             is_fs = self.isFullScreen()
-            if hasattr(self, "fs_overlay"):
-                self.fs_overlay.setVisible(is_fs)
-                if is_fs:
-                    self._position_fullscreen_overlay()
+            self.fs_overlay.setVisible(is_fs)
+            if is_fs:
+                self._position_fullscreen_overlay()
         super().changeEvent(event)
 
     def _hook_toolbar_extension(self) -> None:
-        if not hasattr(self, "toolbar"):
+        """Make Qt's overflow (») button open the More Options menu instead of its own popup."""
+        if self._toolbar_ext is not None:
             return
         ext = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
-        if ext and not getattr(ext, "_hooked", False):
-            ext._hooked = True
+        if ext is not None:
+            self._toolbar_ext = ext
             ext.setToolTip("More Options (3 dots menu)")
             ext.installEventFilter(self)
 
     def eventFilter(self, watched, event) -> bool:
-        if hasattr(self, "toolbar") and event.type() in (
+        if watched is self._toolbar_ext and event.type() in (
             QEvent.Type.MouseButtonPress,
             QEvent.Type.MouseButtonDblClick,
         ):
-            ext = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
-            if watched is ext:
-                self.show_more_options_menu(anchor_widget=ext)
-                return True
+            self.show_more_options_menu(anchor_widget=self._toolbar_ext)
+            return True
         return super().eventFilter(watched, event)
 
     def show_more_options_menu(self, anchor_widget: Optional[QWidget] = None, exec_menu: bool = True) -> QMenu:
@@ -1534,8 +1449,6 @@ class HakuViewWindow(QMainWindow):
         act_save.setEnabled(modified)
         act_save_as = menu.addAction("💾 Save As... (Ctrl+Shift+S)", self.save_as_dialog)
         act_save_as.setEnabled(is_img)
-        act_del = menu.addAction("🗑 Delete File (Delete)", self.delete_current_file)
-        act_del.setEnabled(has_file)
 
         menu.addSeparator()
 
@@ -1588,7 +1501,7 @@ class HakuViewWindow(QMainWindow):
         act_fit.setEnabled(is_img)
         act_act = menu.addAction("1:1 Actual Size (1)", self.canvas.zoom_actual)
         act_act.setEnabled(is_img)
-        act_fs = menu.addAction("⛶ Fullscreen (F)", self.toggle_fullscreen)
+        menu.addAction("⛶ Fullscreen (F)", self.toggle_fullscreen)
         act_info = menu.addAction("ℹ Media Inspector / Info Card (Ctrl+I)", self.show_media_info_dialog)
         act_info.setEnabled(has_file)
 
@@ -1597,23 +1510,19 @@ class HakuViewWindow(QMainWindow):
         menu.addAction("🦉 About HakuView...", self.show_about_dialog)
 
         # Position menu cleanly under the anchor button without spilling off-screen
-        anchor = anchor_widget or getattr(self, "btn_more", None)
+        anchor = anchor_widget or self.btn_more
         menu.adjustSize()
         menu_w = menu.sizeHint().width()
         menu_h = menu.sizeHint().height()
 
-        if anchor and anchor.isVisible():
+        if anchor.isVisible():
             # Align menu's top-right corner with anchor's bottom-right corner
             pos = anchor.mapToGlobal(QPoint(anchor.width() - menu_w, anchor.height()))
         else:
             pos = self.mapToGlobal(QPoint(self.width() - menu_w - 16, 40))
 
         # Clamp within available screen geometry so menu is never offscreen or hidden
-        screen = None
-        if anchor and hasattr(anchor, "screen"):
-            screen = anchor.screen()
-        if not screen:
-            screen = self.screen() or QApplication.primaryScreen()
+        screen = anchor.screen() or self.screen() or QApplication.primaryScreen()
 
         if screen:
             avail = screen.availableGeometry()
@@ -1625,7 +1534,7 @@ class HakuViewWindow(QMainWindow):
             y = pos.y()
             if y + menu_h > avail.bottom():
                 # Pop upwards if below bottom
-                if anchor and anchor.isVisible():
+                if anchor.isVisible():
                     y = anchor.mapToGlobal(QPoint(0, 0)).y() - menu_h
                 else:
                     y = avail.bottom() - menu_h
@@ -1639,29 +1548,14 @@ class HakuViewWindow(QMainWindow):
         return menu
 
     def show_shortcuts_dialog(self) -> None:
+        # Generated from the same tables that bind the keys, so the help can't drift.
+        rows = [(label, text) for _seqs, _fn, label, text in self._shortcut_table if label]
+        rows = self._KEYPRESS_HELP + rows
         msg = (
             "<h3>HakuView Keyboard & Mouse Shortcuts</h3>"
             "<table cellpadding='4' style='font-size: 13px;'>"
-            "<tr><td><b>← / →</b></td><td>Previous / Next file in folder</td></tr>"
-            "<tr><td><b>Ctrl + M</b></td><td>Jump to random file in folder</td></tr>"
-            "<tr><td><b>C</b></td><td>Border Crop (drag borders & press C or Enter)</td></tr>"
-            "<tr><td><b>R / L</b></td><td>Rotate 90° Right / Left</td></tr>"
-            "<tr><td><b>H / V</b></td><td>Flip Horizontal / Vertical</td></tr>"
-            "<tr><td><b>K</b></td><td>1-Click Compress & save as variant</td></tr>"
-            "<tr><td><b>B</b></td><td>Toggle Color Scaling (Brightness & Contrast) panel</td></tr>"
-            "<tr><td><b>Ctrl + Z</b></td><td>Undo last edit</td></tr>"
-            "<tr><td><b>Ctrl + S</b></td><td>Save changes (atomic in-place)</td></tr>"
-            "<tr><td><b>Ctrl + Shift + S</b></td><td>Save As...</td></tr>"
-            "<tr><td><b>W or F5</b></td><td>Toggle Slideshow ([ and ] for speed)</td></tr>"
-            "<tr><td><b>F or Double-Click</b></td><td>Toggle Fullscreen</td></tr>"
-            "<tr><td><b>+ / - or Wheel</b></td><td>Zoom (centered at mouse)</td></tr>"
-            "<tr><td><b>0 / 1</b></td><td>Fit to window / 100% 1:1 size</td></tr>"
-            "<tr><td><b>Space or Click</b></td><td>Play / Pause video (or pan image)</td></tr>"
-            "<tr><td><b>[ / I and ] / O</b></td><td>Mark Video In-point / Out-point for Trim</td></tr>"
-            "<tr><td><b>T</b></td><td>Export Trimmed Video Clip (Lossless FFmpeg)</td></tr>"
-            "<tr><td><b>I / Ctrl + I</b></td><td>Media Inspector / Geek Info Card (Bitrate, Compression, Codec, EXIF)</td></tr>"
-            "<tr><td><b>Ctrl + W / Esc</b></td><td>Close window / Exit fullscreen / Clear trim</td></tr>"
-            "</table>"
+            + "".join(f"<tr><td><b>{html.escape(k)}</b></td><td>{html.escape(t)}</td></tr>" for k, t in rows)
+            + "</table>"
         )
         box = QMessageBox(self)
         box.setWindowTitle("Keyboard Shortcuts — HakuView")
@@ -1672,7 +1566,7 @@ class HakuViewWindow(QMainWindow):
     def show_about_dialog(self) -> None:
         full_license_text = (
             "HakuView — MIT License\n\n"
-            "Copyright (c) 2026 Hakan Ünal (@hakanu_) / HakuView\n\n"
+            "Copyright (c) 2026 Hakan Uysal (@hakanu_) / HakuView\n\n"
             "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
             "of this software and associated documentation files (the \"Software\"), to deal\n"
             "in the Software without restriction, including without limitation the rights\n"

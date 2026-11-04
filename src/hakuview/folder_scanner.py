@@ -6,7 +6,7 @@ import os
 import random
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 IMAGE_EXTENSIONS = frozenset({
     ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
@@ -199,15 +199,3 @@ class FolderNavigator:
                     if is_image_file(candidate) and candidate not in result:
                         result.append(candidate)
         return result
-
-    def remove_current_from_list(self) -> Optional[Path]:
-        """Remove the current file from the in-memory list and return the new current file."""
-        if not self.files or self.index < 0:
-            return None
-        self.files.pop(self.index)
-        if not self.files:
-            self.index = -1
-            return None
-        if self.index >= len(self.files):
-            self.index = len(self.files) - 1
-        return self.current_file

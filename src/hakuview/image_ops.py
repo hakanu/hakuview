@@ -44,6 +44,12 @@ def load_qimage_fast(path: Path | str) -> Optional[QImage]:
         return None
 
 
+def is_animated_image(path: Path | str) -> bool:
+    """True if the file holds more than one frame (animated GIF / WebP / APNG)."""
+    reader = QImageReader(str(path))
+    return reader.supportsAnimation() and reader.imageCount() > 1
+
+
 def rotate_qimage(image: QImage, degrees: int) -> QImage:
     """Rotate a QImage by 90, -90, or 180 degrees."""
     transform = QTransform()
@@ -53,10 +59,13 @@ def rotate_qimage(image: QImage, degrees: int) -> QImage:
 
 def flip_qimage(image: QImage, horizontal: bool = False, vertical: bool = False) -> QImage:
     """Flip a QImage horizontally and/or vertically."""
-    return image.flipped(
-        Qt.Orientation.Horizontal if horizontal else Qt.Orientation(0)
-        | (Qt.Orientation.Vertical if vertical else Qt.Orientation(0))
-    ) if hasattr(image, "flipped") else image.mirrored(horizontal, vertical)
+    if not (horizontal or vertical):
+        return image
+    if not hasattr(image, "flipped"):  # Qt < 6.9 only has the (now deprecated) mirrored()
+        return image.mirrored(horizontal, vertical)
+    if horizontal and vertical:
+        return image.flipped(Qt.Orientation.Horizontal | Qt.Orientation.Vertical)
+    return image.flipped(Qt.Orientation.Horizontal if horizontal else Qt.Orientation.Vertical)
 
 
 def crop_qimage(image: QImage, rect: QRect) -> QImage:

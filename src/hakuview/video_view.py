@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import shutil
 import subprocess
 from typing import Optional
 
-from PySide6.QtCore import QObject, QRect, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QRect, QThread, QThreadPool, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QResizeEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -73,118 +72,120 @@ def detect_video_codec(path: Path) -> Optional[str]:
         return None
 
 
-class _TranscodeWorker(QObject):
+class _CodecProbeSignals(QObject):
+    """Carries an async ffprobe result (path, codec name) back to the UI thread."""
+
+    detected = Signal(str, str)
+
+
+class _FfmpegJob(QObject):
+    """Runs one or more ffmpeg attempts in a worker thread; cancel() kills the running process.
+
+    Each attempt is (command, min_output_bytes); the first that exits 0 and produces a large
+    enough file wins. `done` is always emitted last so the owning QThread can quit, even when
+    the job was cancelled (cancellation emits neither `finished` nor `failed`).
+    """
+
     finished = Signal(Path)
     failed = Signal(str)
+    done = Signal()
+
+    label = "FFmpeg job"
 
     def __init__(self, src_path: Path, dest_path: Path) -> None:
         super().__init__()
         self.src_path = src_path
         self.dest_path = dest_path
+        self._proc: Optional[subprocess.Popen] = None
+        self._cancelled = False
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        raise NotImplementedError
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
 
     def run(self) -> None:
+        try:
+            self._run()
+        finally:
+            self.done.emit()
+
+    def _run(self) -> None:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             self.failed.emit("ffmpeg is not installed on this system.")
             return
+        err_msg = ""
         try:
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(self.src_path),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "22",
-                "-c:a",
-                "copy",
-                str(self.dest_path),
-            ]
-            res = subprocess.run(cmd, capture_output=True, check=False)
-            if res.returncode == 0 and self.dest_path.exists():
-                self.finished.emit(self.dest_path)
-            else:
-                err_msg = res.stderr.decode("utf-8", errors="replace")[-300:]
-                self.failed.emit(f"Transcoding failed:\n{err_msg}")
+            for cmd, min_bytes in self._attempts(ffmpeg):
+                if self._cancelled:
+                    break
+                self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                _, stderr = self._proc.communicate()
+                if (
+                    self._proc.returncode == 0
+                    and self.dest_path.exists()
+                    and self.dest_path.stat().st_size > min_bytes
+                ):
+                    self.finished.emit(self.dest_path)
+                    return
+                err_msg = stderr.decode("utf-8", errors="replace")[-300:]
         except Exception as exc:
-            self.failed.emit(str(exc))
+            err_msg = str(exc)
+        if self._cancelled:
+            self.dest_path.unlink(missing_ok=True)
+            return
+        self.failed.emit(f"{self.label} failed:\n{err_msg}")
 
 
-class _TrimWorker(QObject):
-    """Worker performing lossless stream-copy video trimming with FFmpeg in a background thread."""
+class _TranscodeWorker(_FfmpegJob):
+    """Re-encodes a video to H.264 MP4 (for streams the GPU/Qt backend can't decode)."""
 
-    finished = Signal(Path)
-    failed = Signal(str)
+    label = "Transcoding"
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        cmd = [
+            ffmpeg, "-y", "-i", str(self.src_path),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "copy",
+            str(self.dest_path),
+        ]
+        return [(cmd, 0)]
+
+
+class _TrimWorker(_FfmpegJob):
+    """Cuts [start_ms, end_ms] out of a video: stream copy first, re-encode as fallback.
+
+    Stream copy is instant and lossless but can only cut on keyframes, so the clip may start
+    slightly before the In-point.
+    """
+
+    label = "Trimming"
 
     def __init__(self, src_path: Path, dest_path: Path, start_ms: int, end_ms: int) -> None:
-        super().__init__()
-        self.src_path = src_path
-        self.dest_path = dest_path
+        super().__init__(src_path, dest_path)
         self.start_ms = start_ms
         self.end_ms = end_ms
 
-    def run(self) -> None:
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            self.failed.emit("ffmpeg is not installed on this system.")
-            return
-
-        start_ts = _format_ffmpeg_timestamp(self.start_ms)
-        end_ts = _format_ffmpeg_timestamp(self.end_ms)
-
-        try:
-            # 1. First attempt: Instant lossless stream copy (-c copy)
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-ss",
-                start_ts,
-                "-to",
-                end_ts,
-                "-i",
-                str(self.src_path),
-                "-c",
-                "copy",
-                "-avoid_negative_ts",
-                "make_zero",
-                str(self.dest_path),
-            ]
-            res = subprocess.run(cmd, capture_output=True, check=False)
-            if res.returncode == 0 and self.dest_path.exists() and self.dest_path.stat().st_size > 1000:
-                self.finished.emit(self.dest_path)
-                return
-
-            # 2. Fallback: Fast visually lossless re-encode if container rejects stream-copy cut
-            cmd_fallback = [
-                ffmpeg,
-                "-y",
-                "-ss",
-                start_ts,
-                "-to",
-                end_ts,
-                "-i",
-                str(self.src_path),
-                "-c:v",
-                "libx264",
-                "-crf",
-                "18",
-                "-preset",
-                "ultrafast",
-                "-c:a",
-                "copy",
-                str(self.dest_path),
-            ]
-            res2 = subprocess.run(cmd_fallback, capture_output=True, check=False)
-            if res2.returncode == 0 and self.dest_path.exists() and self.dest_path.stat().st_size > 0:
-                self.finished.emit(self.dest_path)
-            else:
-                err_msg = res2.stderr.decode("utf-8", errors="replace")[-300:]
-                self.failed.emit(f"Trimming failed:\n{err_msg}")
-        except Exception as exc:
-            self.failed.emit(str(exc))
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        cut = [
+            ffmpeg, "-y",
+            "-ss", _format_ffmpeg_timestamp(self.start_ms),
+            "-to", _format_ffmpeg_timestamp(self.end_ms),
+            "-i", str(self.src_path),
+        ]
+        stream_copy = cut + ["-c", "copy", "-avoid_negative_ts", "make_zero", str(self.dest_path)]
+        reencode = cut + [
+            "-c:v", "libx264", "-crf", "18", "-preset", "ultrafast",
+            "-c:a", "copy",
+            str(self.dest_path),
+        ]
+        # A near-empty stream-copy output means the container rejected the cut.
+        return [(stream_copy, 1000), (reencode, 0)]
 
 
 class ClickableSlider(QSlider):
@@ -332,9 +333,8 @@ class ClickableVideoWidget(QVideoWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        if hasattr(self, "color_overlay"):
-            self.color_overlay.setGeometry(self.rect())
-            self.color_overlay.raise_()
+        self.color_overlay.setGeometry(self.rect())
+        self.color_overlay.raise_()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -364,7 +364,6 @@ class VideoPlayerWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._loop_when_not_slideshow: bool = True
         self._in_slideshow: bool = False
         self._slider_dragging: bool = False
         self.trim_in_ms: Optional[int] = None
@@ -581,10 +580,12 @@ class VideoPlayerWidget(QWidget):
         banner_layout.addWidget(self.btn_transcode)
 
         self._current_path: Optional[Path] = None
-        self._thread: Optional[QThread] = None
-        self._worker: Optional[_TranscodeWorker] = None
-        self._trim_thread: Optional[QThread] = None
-        self._trim_worker: Optional[_TrimWorker] = None
+        # At most one ffmpeg job (trim or transcode) runs at a time.
+        self._job: Optional[_FfmpegJob] = None
+        self._job_thread: Optional[QThread] = None
+        self._finished_emitted: bool = False
+        self._codec_probe = _CodecProbeSignals(self)
+        self._codec_probe.detected.connect(self._on_codec_detected)
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -603,24 +604,67 @@ class VideoPlayerWidget(QWidget):
     def load_video(self, path: Path, slideshow_active: bool = False) -> None:
         self._current_path = path
         self._in_slideshow = slideshow_active
+        self._finished_emitted = False
         self.clear_trim()
+        self.banner.setVisible(False)
 
-        # Check for AV1 streams in WebM files
+        # Probe for AV1 streams off the UI thread (ffprobe can take a second or more);
+        # the banner is shown when the result arrives, if this file is still current.
         if path.suffix.lower() in (".webm", ".mkv"):
-            codec = detect_video_codec(path)
-            if codec == "av1":
-                self.lbl_banner.setText("⚠️ AV1 video stream: playing audio only (GPU lacks hardware AV1 decoder).")
-                self.btn_transcode.setEnabled(True)
-                self.btn_transcode.setText("⚡ Convert to MP4 (H.264)")
-                self.banner.setVisible(True)
-            else:
-                self.banner.setVisible(False)
-        else:
-            self.banner.setVisible(False)
+            probe = self._codec_probe
+            QThreadPool.globalInstance().start(
+                lambda: probe.detected.emit(str(path), detect_video_codec(path) or "")
+            )
 
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self.player.play()
+
+    def _on_codec_detected(self, path_str: str, codec: str) -> None:
+        if codec != "av1" or self._current_path is None or str(self._current_path) != path_str:
+            return
+        self.lbl_banner.setText("⚠️ AV1 video stream: playing audio only (GPU lacks hardware AV1 decoder).")
+        self.btn_transcode.setEnabled(self._job is None)
+        self.btn_transcode.setText("⚡ Convert to MP4 (H.264)")
+        self.banner.setVisible(True)
+
+    # ------------------------------------------------------------------
+    # Background ffmpeg jobs
+    # ------------------------------------------------------------------
+
+    def is_job_running(self) -> bool:
+        return self._job is not None
+
+    def _start_job(self, job: _FfmpegJob, on_success, on_failure) -> bool:
+        if self._job is not None:
+            QMessageBox.information(self, "Busy", "Another video export is still running. Please wait for it to finish.")
+            return False
+        thread = QThread(self)
+        job.moveToThread(thread)
+        thread.started.connect(job.run)
+        job.finished.connect(on_success)
+        job.failed.connect(on_failure)
+        job.done.connect(thread.quit)
+        thread.finished.connect(self._on_job_thread_finished)
+        thread.finished.connect(job.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._job, self._job_thread = job, thread
+        thread.start()
+        return True
+
+    def _on_job_thread_finished(self) -> None:
+        self._job = None
+        self._job_thread = None
+
+    def shutdown(self) -> None:
+        """Cancel any running ffmpeg job and wait for its thread (call before the app exits)."""
+        job, thread = self._job, self._job_thread
+        if job is not None and thread is not None:
+            job.cancel()
+            thread.quit()
+            thread.wait(5000)
+        self._job = None
+        self._job_thread = None
 
     def _on_transcode_clicked(self) -> None:
         if self._current_path is None:
@@ -631,18 +675,10 @@ class VideoPlayerWidget(QWidget):
             dest_path = self._current_path.parent / f"{self._current_path.stem}_{counter}.mp4"
             counter += 1
 
-        self.btn_transcode.setEnabled(False)
-        self.btn_transcode.setText("⏳ Converting...")
-
-        self._thread = QThread()
-        self._worker = _TranscodeWorker(self._current_path, dest_path)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self._on_transcode_success)
-        self._worker.failed.connect(self._on_transcode_failed)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.failed.connect(self._thread.quit)
-        self._thread.start()
+        job = _TranscodeWorker(self._current_path, dest_path)
+        if self._start_job(job, self._on_transcode_success, self._on_transcode_failed):
+            self.btn_transcode.setEnabled(False)
+            self.btn_transcode.setText("⏳ Converting...")
 
     def _on_transcode_success(self, new_path: Path) -> None:
         self.banner.setVisible(False)
@@ -728,18 +764,10 @@ class VideoPlayerWidget(QWidget):
             dest_path = self._current_path.parent / f"{self._current_path.stem}_trim_{counter}{self._current_path.suffix}"
             counter += 1
 
-        self.btn_trim.setEnabled(False)
-        self.btn_trim.setText("⏳ Trimming...")
-
-        self._trim_thread = QThread()
-        self._trim_worker = _TrimWorker(self._current_path, dest_path, start_ms, end_ms)
-        self._trim_worker.moveToThread(self._trim_thread)
-        self._trim_thread.started.connect(self._trim_worker.run)
-        self._trim_worker.finished.connect(self._on_trim_success)
-        self._trim_worker.failed.connect(self._on_trim_failed)
-        self._trim_worker.finished.connect(self._trim_thread.quit)
-        self._trim_worker.failed.connect(self._trim_thread.quit)
-        self._trim_thread.start()
+        job = _TrimWorker(self._current_path, dest_path, start_ms, end_ms)
+        if self._start_job(job, self._on_trim_success, self._on_trim_failed):
+            self.btn_trim.setEnabled(False)
+            self.btn_trim.setText("⏳ Trimming...")
 
     def _on_trim_success(self, new_path: Path) -> None:
         self.clear_trim()
@@ -786,8 +814,7 @@ class VideoPlayerWidget(QWidget):
 
     def set_color_scaling(self, brightness: int, contrast: int) -> None:
         """Apply color scaling overlay to live video playback."""
-        if hasattr(self.video_widget, "color_overlay"):
-            self.video_widget.color_overlay.set_color(brightness, contrast)
+        self.video_widget.color_overlay.set_color(brightness, contrast)
 
     def grab_current_frame(self) -> Optional[QImage]:
         """Extract the current video frame as a high-resolution QImage."""
@@ -802,7 +829,7 @@ class VideoPlayerWidget(QWidget):
         except Exception:
             pass
 
-        cur = getattr(self, "_current_path", None)
+        cur = self._current_path
         if not cur or not cur.exists():
             return None
         ffmpeg = shutil.which("ffmpeg")
@@ -870,13 +897,23 @@ class VideoPlayerWidget(QWidget):
             self.play_btn.setText("▶ Play")
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
-        if status in (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia):
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
             if self._in_slideshow:
-                self.videoFinished.emit()
-            elif self._loop_when_not_slideshow:
+                self._emit_finished_once()
+            else:
                 self.player.setPosition(0)
                 self.player.play()
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            # Never loop on a file that can't be played: replaying it fails again forever.
+            if self._in_slideshow:
+                self._emit_finished_once()
 
     def _on_player_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
         if self._in_slideshow:
+            self._emit_finished_once()
+
+    def _emit_finished_once(self) -> None:
+        # A broken file reports both InvalidMedia and errorOccurred; advance the slideshow only once.
+        if not self._finished_emitted:
+            self._finished_emitted = True
             self.videoFinished.emit()
