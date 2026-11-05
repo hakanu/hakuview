@@ -496,6 +496,19 @@ _APP_QSS_TEMPLATE = """
         border-color: @accent;
         color: #ffffff;
     }
+    /* ---- Go to File (Ctrl+G) ---- */
+    QDialog#gotoDialog { background-color: @panel; color: @text; }
+    QDialog#gotoDialog QLabel { color: @text_muted; font-size: 11px; }
+    QDialog#gotoDialog QListWidget {
+        background-color: @surface;
+        color: @text;
+        border: 1px solid @border;
+        border-radius: 4px;
+        outline: none;
+    }
+    QDialog#gotoDialog QListWidget::item { padding: 3px 6px; }
+    QDialog#gotoDialog QListWidget::item:hover { background-color: @surface_hover; }
+    QDialog#gotoDialog QListWidget::item:selected { background-color: @accent_strong; color: #ffffff; }
     QLineEdit, QSpinBox {
         background-color: @surface;
         color: @text;

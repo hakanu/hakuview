@@ -1411,3 +1411,91 @@ def test_checkbox_and_radio_state_is_visible(mode: str, qtbot) -> None:
     for off, on in ((widgets[0], widgets[1]), (widgets[2], widgets[3])):
         assert accent_pixels(off) < 5, f"unchecked {type(off).__name__} should not look selected ({mode})"
         assert accent_pixels(on) > 8, f"checked {type(on).__name__} must clearly show it ({mode})"
+
+
+def test_goto_matching_numbers_and_names() -> None:
+    from hakuview.goto_dialog import match_files
+
+    files = [Path(n) for n in ("IMG_0001.jpg", "beach.png", "WhatsApp Image 2.jpeg", "img_party.jpg", "clip.mp4")]
+    assert match_files(files, "") == [0, 1, 2, 3, 4]
+    assert match_files(files, "img") == [0, 3]  # case-insensitive
+    assert match_files(files, "image") == [2]
+    assert match_files(files, "c") == [4, 1]  # "clip" starts with it, so it comes before "beach"
+    assert match_files(files, "2") == [1, 2]  # position 2, then names containing "2"
+    assert match_files(files, "99") == []
+    assert match_files(files, "zzz") == []
+
+
+def test_goto_dialog_jumps_to_chosen_file(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog
+
+    for name in ("a.png", "b.png", "sunset.png", "z.png"):
+        _create_sample_image(tmp_path / name, width=20, height=20)
+    win = HakuViewWindow(initial_path=tmp_path / "a.png")
+    qtbot.addWidget(win)
+
+    from hakuview import goto_dialog
+
+    def fake_exec(dlg):
+        assert dlg.list.currentRow() == 0  # starts on the current file
+        QTest.keyClicks(dlg.edit, "suns")
+        assert dlg.list.count() == 1
+        dlg.accept()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(goto_dialog.GoToFileDialog, "exec", fake_exec)
+    assert win.show_goto_dialog() == tmp_path / "sunset.png"
+    assert win.navigator.current_file == tmp_path / "sunset.png"
+    assert win.go_to_index(99) is None
+
+
+def test_save_video_frame_writes_png_next_to_video(tmp_path: Path, qtbot) -> None:
+    win = _video_window(tmp_path, qtbot)
+    frame = QImage(64, 36, QImage.Format.Format_RGB32)
+    frame.fill(QColor(100, 100, 100))
+    win.video_view.grab_current_frame = lambda: frame
+    win.color_bar.slider_brightness.setValue(50)  # saved as seen on screen
+
+    target = win.save_video_frame()
+    assert target is not None and target.parent == tmp_path
+    assert target.name == "clip_frame_00m00s000.png"
+    saved = QImage(str(target))
+    assert (saved.width(), saved.height()) == (64, 36)
+    assert saved.pixelColor(5, 5).red() > 150
+    assert target in win.navigator.files  # shows up in ←/→ browsing
+    assert win.save_video_frame().name == "clip_frame_00m00s000_2.png"  # never overwrites
+
+
+def test_recent_folders_menu(tmp_path: Path, qtbot) -> None:
+    from hakuview.settings import MAX_RECENT_FOLDERS
+
+    folders = []
+    for i in range(3):
+        d = tmp_path / f"f{i}"
+        d.mkdir()
+        _create_sample_image(d / "x.png", width=20, height=20)
+        folders.append(d)
+    win = HakuViewWindow(initial_path=folders[0])
+    qtbot.addWidget(win)
+    win.open_path(folders[1] / "x.png")
+    win.open_path(folders[0])
+    assert win.app_settings.recent_folders[:2] == [str(folders[0]), str(folders[1])]  # newest first, no dupes
+
+    menu = win.show_more_options_menu(exec_menu=False)
+    recent = next(a.menu() for a in menu.actions() if a.text() == "🕘 Recent Folders")
+    entry = next(a for a in recent.actions() if a.text() == str(folders[1]))
+    entry.trigger()
+    assert win.navigator.folder == folders[1]
+
+    folders[2].joinpath("x.png").unlink()
+    folders[2].rmdir()
+    win.app_settings.add_recent_folder(str(folders[2]))
+    assert not win.open_recent_folder(str(folders[2]))  # gone: dropped from the list
+    assert str(folders[2]) not in win.app_settings.recent_folders
+
+    for i in range(MAX_RECENT_FOLDERS + 3):
+        win.app_settings.add_recent_folder(f"/tmp/nowhere{i}")
+    assert len(win.app_settings.recent_folders) == MAX_RECENT_FOLDERS
+    win.clear_recent_folders()
+    assert win.app_settings.recent_folders == []

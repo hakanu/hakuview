@@ -37,6 +37,10 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   Open any single picture or video from anywhere in a directory. HakuView naturally orders sibling files and preloads neighbors in the background for zero-latency cycling.
 - 🎲 **Random File Jump (`Ctrl+M`)**  
   Jump to a random photo or video in the folder, or launch directly with `hakuview --random ~/Pictures`.
+- 🔎 **Go to File (`Ctrl+G`)**  
+  Type a position number or part of a file name, pick with `↑` / `↓`, press `Enter`. Handy in folders with hundreds of files.
+- 🕘 **Recent Folders**  
+  The ⋯ menu lists the last 8 folders you opened (turn off with "Remember window size, position and recent folders" in Settings).
 - ✂️ **Border Crop (`C`)**  
   Press `C` to reveal border handles on the image edges. Pull any side or corner inward and press `C` or `Enter` to crop. (Or simply left-drag a freehand box).
 - 🔄 **Quick Rotate & Flip (`R` / `L` / `H` / `V`)**  
@@ -54,7 +58,7 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 - ℹ️ **Geeky Media Inspector (`I` / `Ctrl+I`)**  
   Opens a detailed technical card showing true compression ratios, video/audio bitrates, bits-per-pixel (BPP) efficiency, container profiles, and camera EXIF data with 1-click clipboard export.
 - ⚙️ **Settings & Themes (`Ctrl+,`)**  
-  Dark, Light or Follow-system theme, mouse wheel = zoom or next/previous file, sort by name / date / size, default compression preset and slideshow interval. Window size, position, last folder and volume are remembered.
+  Dark, Light or Follow-system theme, mouse wheel = zoom or next/previous file, sort by name / date / size, default compression preset and slideshow interval. Window size, position, recent folders and volume are remembered.
 
 ---
 
@@ -80,6 +84,8 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `,` / `.` | Video: step one frame back / forward |
 | `Ctrl + C` / `Ctrl + Shift + C` | Copy image (or video frame) / copy file path |
 | `F2` | Rename the current file |
+| `Ctrl + G` | Go to file by number or name |
+| `S` | Video: save the current frame as PNG next to the video (with brightness/contrast) |
 | `Ctrl + ,` | Settings (theme, wheel, sorting, defaults) |
 | `0` / `1` | Fit to window / 100% actual size |
 | `Click Video` or `Space` | Play / Pause (stop) video |

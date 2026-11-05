@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtCore import QByteArray, QSettings
 
@@ -11,6 +11,7 @@ from .image_ops import COMPRESSION_MODES
 from .theme import THEME_MODES
 
 WHEEL_ACTIONS = ("zoom", "navigate")
+MAX_RECENT_FOLDERS = 8
 
 
 def _setting(key: str, default, kind, choices=None):
@@ -41,6 +42,21 @@ class AppSettings:
     video_muted = _setting("video/muted", False, bool)
     remember_session = _setting("session/remember", True, bool)
     last_folder = _setting("session/last_folder", "", str)
+
+    @property
+    def recent_folders(self) -> List[str]:
+        """Most recent first, without duplicates."""
+        value = self._s.value("session/recent_folders", [])
+        if isinstance(value, str):  # QSettings collapses a one-item list to a string on some backends
+            value = [value]
+        return [str(v) for v in (value or []) if v][:MAX_RECENT_FOLDERS]
+
+    @recent_folders.setter
+    def recent_folders(self, folders: List[str]) -> None:
+        self._s.setValue("session/recent_folders", list(folders)[:MAX_RECENT_FOLDERS])
+
+    def add_recent_folder(self, folder: str) -> None:
+        self.recent_folders = [folder] + [f for f in self.recent_folders if f != folder]
 
     @property
     def window_geometry(self) -> Optional[QByteArray]:

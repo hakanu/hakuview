@@ -82,7 +82,7 @@ class SettingsDialog(QDialog):
         # Startup
         self.chk_updates = QCheckBox("Check for updates on startup", self)
         self.chk_updates.setChecked(update_settings.check_on_startup)
-        self.chk_session = QCheckBox("Remember window size, position and last folder", self)
+        self.chk_session = QCheckBox("Remember window size, position and recent folders", self)
         self.chk_session.setChecked(app_settings.remember_session)
         root.addWidget(self._group("Startup", [("", self.chk_updates), ("", self.chk_session)]))
 

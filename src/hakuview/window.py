@@ -55,6 +55,7 @@ from .image_ops import (
     CompressionError,
     ImageDocument,
     ImagePreloadCache,
+    _next_variant_path,
     adjust_qimage_color,
     describe_load_failure,
     compress_image_as_variant,
@@ -64,6 +65,7 @@ from .image_ops import (
     _next_variant_path,
     save_qimage_atomic,
 )
+from .goto_dialog import GoToFileDialog
 from .info_dialog import MediaInfoDialog
 from .installer import ensure_hakuview_ico
 from .settings import AppSettings
@@ -483,6 +485,8 @@ class HakuViewWindow(QMainWindow):
             (("Ctrl+,",), self.show_settings_dialog, "Ctrl+,", "Settings (theme, wheel, sorting, defaults...)"),
             (("Ctrl+Z",), self.undo_edit, "Ctrl+Z", "Undo last edit"),
             (("Ctrl+M",), self.random_item, "Ctrl+M", "Jump to random file in folder"),
+            (("Ctrl+G",), self.show_goto_dialog, "Ctrl+G", "Go to file by number or name"),
+            (("S",), self.save_video_frame, "S", "Video: save current frame as PNG"),
             (("I", "Ctrl+I"), self._on_key_i, "I / Ctrl+I", "Media Inspector (I marks video In-point)"),
             (("Shift+I",), self.toggle_info_overlay, "Shift+I", "Toggle info HUD overlay"),
             (("R",), self.rotate_right, "R / L", "Rotate 90° Right / Left"),
@@ -692,7 +696,39 @@ class HakuViewWindow(QMainWindow):
                 f"No supported images or videos found in:\n{path}",
             )
             return False
+        if self.app_settings.remember_session and self.navigator.folder is not None:
+            self.app_settings.add_recent_folder(str(self.navigator.folder))
         return self._display_current_file()
+
+    def open_recent_folder(self, folder: str) -> bool:
+        if not Path(folder).is_dir():
+            self.app_settings.recent_folders = [f for f in self.app_settings.recent_folders if f != folder]
+            self.status.showMessage(f"⚠ Folder no longer exists, removed from the list: {folder}", 5000)
+            return False
+        return self.open_path(Path(folder))
+
+    def clear_recent_folders(self) -> None:
+        self.app_settings.recent_folders = []
+        self.status.showMessage("Recent folders cleared.", 2500)
+
+    def show_goto_dialog(self) -> Optional[Path]:
+        if self.navigator.count == 0:
+            self.status.showMessage("Open a file or folder first.", 2500)
+            return None
+        dlg = GoToFileDialog(self.navigator.files, self.navigator.index, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.selected_index is None:
+            return None
+        return self.go_to_index(dlg.selected_index)
+
+    def go_to_index(self, index: int) -> Optional[Path]:
+        if not 0 <= index < self.navigator.count:
+            return None
+
+        def move() -> Path:
+            self.navigator.index = index
+            return self.navigator.files[index]
+
+        return self._navigate(move)
 
     def _navigate(self, move) -> Optional[Path]:
         """Run a FolderNavigator move (after the unsaved-changes prompt) and display the result."""
@@ -1003,6 +1039,28 @@ class HakuViewWindow(QMainWindow):
         what = "video frame" if self.current_is_video else "image"
         self.status.showMessage(f"📋 Copied {what} ({image.width()} × {image.height()}) to the clipboard.", 3000)
         return True
+
+    def save_video_frame(self) -> Optional[Path]:
+        """Write the current video frame (with any brightness/contrast) next to the video as PNG."""
+        cur = self.navigator.current_file
+        if not self.current_is_video or cur is None:
+            return None
+        image = self.video_view.grab_current_frame()
+        if image is None or image.isNull():
+            self.status.showMessage("⚠ Couldn't grab this frame.", 3000)
+            return None
+        image = adjust_qimage_color(image, self.color_bar.brightness, self.color_bar.contrast)
+        ms = max(0, self.video_view.player.position())
+        stamp = f"frame_{ms // 60000:02d}m{ms // 1000 % 60:02d}s{ms % 1000:03d}"
+        target = _next_variant_path(cur, stamp, ".png")
+        self._ignore_watch_until = time.monotonic() + 1.5
+        try:
+            save_qimage_atomic(image, target)
+        except Exception as exc:
+            self.status.showMessage(f"⚠ Couldn't write {target.name}: {exc}", 6000)
+            return None
+        self._add_new_file_to_folder(target, f"🖼 Frame saved ({image.width()} × {image.height()})")
+        return target
 
     def copy_file_path(self) -> None:
         cur = self.navigator.current_file
@@ -1423,10 +1481,22 @@ class HakuViewWindow(QMainWindow):
 
         # Top level: the everyday actions. Less frequent ones live in File / Image / View / Help.
         add("📂 Open File... (O)", self.open_file_dialog)
+        recent_menu = menu.addMenu("🕘 Recent Folders")
+        recent = self.app_settings.recent_folders
+        for folder in recent:
+            recent_menu.addAction(folder.replace("&", "&&"), lambda f=folder: self.open_recent_folder(f))
+        if recent:
+            recent_menu.addSeparator()
+            add("Clear List", self.clear_recent_folders, True, recent_menu)
+        else:
+            add("No recent folders", lambda: None, False, recent_menu)
+        add("🔎 Go to File... (Ctrl+G)", self.show_goto_dialog, self.navigator.count > 0)
         add("💾 Save (Ctrl+S)", self.save_current, modified)
         add("💾 Save As... (Ctrl+Shift+S)", self.save_as_dialog, is_img)
         file_menu = menu.addMenu("📁 File")
         add("📋 Copy Image (Ctrl+C)", self.copy_image_to_clipboard, is_img or is_vid, file_menu)
+        if is_vid:
+            add("🖼 Save Current Frame (S)", self.save_video_frame, True, file_menu)
         add("Copy File Path (Ctrl+Shift+C)", self.copy_file_path, has_file, file_menu)
         add("✏ Rename... (F2)", self.rename_current_file, has_file, file_menu)
         add("Show in File Manager", self.show_in_file_manager, has_file, file_menu)
