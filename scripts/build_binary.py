@@ -11,6 +11,11 @@ import sys
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     entry = root / "src" / "hakuview" / "cli.py"
+    sys.path.insert(0, str(root / "src"))
+    from hakuview.installer import ensure_hakuview_ico
+
+    # Embedded in the .exe: Explorer, the taskbar and "Open with" read the icon from here.
+    icon = ensure_hakuview_ico()
     cmd = [
         sys.executable,
         "-m",
@@ -21,6 +26,8 @@ def main() -> int:
         "--windowed",
         "--name",
         "hakuview",
+        "--icon",
+        str(icon),
         "--paths",
         str(root / "src"),
         str(entry),

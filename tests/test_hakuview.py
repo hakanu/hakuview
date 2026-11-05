@@ -1499,3 +1499,84 @@ def test_recent_folders_menu(tmp_path: Path, qtbot) -> None:
     assert len(win.app_settings.recent_folders) == MAX_RECENT_FOLDERS
     win.clear_recent_folders()
     assert win.app_settings.recent_folders == []
+
+
+def test_windows_open_with_registers_hakuview_icon(monkeypatch, tmp_path: Path) -> None:
+    """The 'Open with' dialog takes a ProgID's icon from its Application subkey (fake registry)."""
+    import sys
+    import types
+
+    from hakuview import installer
+
+    keys: dict = {}
+
+    class _Key:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def create_key(_root, path):
+        parts = path.split("\\")
+        for i in range(1, len(parts) + 1):  # like the real registry, intermediate keys are created too
+            keys.setdefault("\\".join(parts[:i]), {})
+        return _Key(path)
+
+    def open_key(_root, path, *_args):
+        if path not in keys:
+            raise OSError(path)
+        return _Key(path)
+
+    def query_value(key, name):
+        if name not in keys[key.path]:
+            raise OSError(name)
+        return keys[key.path][name], 1
+
+    def enum_key(key, i):
+        prefix = key.path + "\\"
+        children = sorted({p[len(prefix):].split("\\")[0] for p in keys if p.startswith(prefix)})
+        if i >= len(children):
+            raise OSError
+        return children[i]
+
+    def delete_key(_root, path):
+        if any(p.startswith(path + "\\") for p in keys):
+            raise OSError("has subkeys")
+        del keys[path]
+
+    def delete_value(key, name):
+        del keys[key.path][name]
+
+    fake = types.SimpleNamespace(
+        HKEY_CURRENT_USER=object(), REG_SZ=1, REG_DWORD=4, REG_NONE=0, KEY_READ=1, KEY_WRITE=2, KEY_SET_VALUE=2,
+        CreateKey=create_key, OpenKey=open_key, QueryValueEx=query_value, EnumKey=enum_key,
+        DeleteKey=delete_key, DeleteValue=delete_value,
+        SetValueEx=lambda key, name, _r, _t, value: keys[key.path].__setitem__(name, value),
+    )
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    ico = tmp_path / "Hakan's Apps" / "hakuview.ico"
+    monkeypatch.setattr(installer, "ensure_hakuview_ico", lambda: ico)
+    gui = tmp_path / "Scripts" / "hakuview-gui.exe"
+    gui.parent.mkdir()
+    gui.write_bytes(b"")
+    monkeypatch.setattr(installer.shutil, "which", lambda name: str(gui) if name == "hakuview-gui" else None)
+    monkeypatch.setattr(installer, "_refresh_windows_shell", lambda: None)
+
+    installer._install_windows_integration()
+    icon = f"{ico},0"  # unquoted "path,index", even with spaces in the path
+    for progid in ("HakuView.Image", "HakuView.Video"):
+        app = keys[rf"Software\Classes\{progid}\Application"]
+        assert app["ApplicationName"] == "HakuView" and app["ApplicationIcon"] == icon
+        assert keys[rf"Software\Classes\{progid}\DefaultIcon"][""] == icon
+        assert keys[rf"Software\Classes\{progid}\shell\open\command"][""] == f'"{gui.resolve()}" "%1"'  # no console window
+    assert "HakuView.Image" in keys[r"Software\Classes\.jpg\OpenWithProgids"]
+    assert keys[r"Software\Classes\Applications\hakuview-gui.exe\DefaultIcon"][""] == icon
+
+    installer._uninstall_windows_integration()
+    left = [p for p in keys if "HakuView" in p or "hakuview" in p]
+    assert not left, "\n".join(left)
+    assert "HakuView.Image" not in keys[r"Software\Classes\.jpg\OpenWithProgids"]

@@ -17,6 +17,8 @@ Install globally with desktop shortcuts and right-click **"Open with HakuView"**
 uv tool install git+https://github.com/hakanu/hakuview.git && hakuview --install-desktop
 ```
 
+On Windows this adds HakuView, with its icon, to Explorer's right-click menu and to the **"Open with" / "How do you want to open this file?"** list. If you set it up with an older version and the icon is missing, run `hakuview --install-desktop` again.
+
 > **Or run instantly without installing:**
 > ```bash
 > uvx --from git+https://github.com/hakanu/hakuview.git hakuview ~/Pictures
