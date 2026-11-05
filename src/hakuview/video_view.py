@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 
 from .image_ops import _next_variant_path, apply_color_lut, color_lut, color_lut_params
+from .proc import no_window
 
 
 PLAYBACK_SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0)
@@ -73,6 +74,7 @@ def detect_video_codec(path: Path) -> Optional[str]:
             text=True,
             timeout=1.5,
             check=False,
+            **no_window(),
         )
         return res.stdout.strip().lower() or None
     except Exception:
@@ -131,7 +133,7 @@ class _FfmpegJob(QObject):
             for cmd, min_bytes in self._attempts(ffmpeg):
                 if self._cancelled:
                     break
-                self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **no_window())
                 _, stderr = self._proc.communicate()
                 if (
                     self._proc.returncode == 0
@@ -865,7 +867,7 @@ class VideoPlayerWidget(QWidget):
                 "png",
                 "-",
             ]
-            res = subprocess.run(cmd, capture_output=True, timeout=2.5)
+            res = subprocess.run(cmd, capture_output=True, timeout=2.5, **no_window())
             if res.returncode == 0 and res.stdout:
                 img = QImage()
                 if img.loadFromData(res.stdout):

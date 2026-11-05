@@ -1614,3 +1614,46 @@ def test_color_sliders_preview_then_render_full_resolution(tmp_path: Path, qtbot
     win.color_bar.slider_brightness.setValue(40)
     win.rotate_right()
     assert win.canvas._pixmap.toImage().pixelColor(5, 5).red() > 130
+
+
+def test_gui_child_processes_never_open_console_windows_on_windows() -> None:
+    """Every subprocess.run/Popen the GUI makes passes **no_window(); otherwise Windows pops up a
+    cmd window for each ffprobe/ffmpeg/git call (e.g. on every video opened)."""
+    import ast
+
+    src = Path(__file__).resolve().parents[1] / "src" / "hakuview"
+    offenders = []
+    for path in sorted(src.glob("*.py")):
+        if path.name in ("installer.py", "cli.py"):  # run from a terminal: output must reach that console
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("run", "Popen", "call", "check_output", "check_call")
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "subprocess"
+            ):
+                hidden = any(
+                    kw.arg is None and isinstance(kw.value, ast.Call) and getattr(kw.value.func, "id", "") == "no_window"
+                    for kw in node.keywords
+                )
+                if not hidden:
+                    offenders.append(f"{path.name}:{node.lineno}")
+    assert offenders == []
+
+
+def test_no_window_flags(monkeypatch, tmp_path: Path) -> None:
+    import sys
+
+    from hakuview import proc
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert proc.no_window() == {}
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert proc.no_window() == {"creationflags": 0x08000000}
+
+    python = tmp_path / "python.exe"
+    (tmp_path / "pythonw.exe").write_bytes(b"")
+    monkeypatch.setattr(sys, "executable", str(python))
+    assert proc.gui_python() == str(tmp_path / "pythonw.exe")  # relaunch without a console

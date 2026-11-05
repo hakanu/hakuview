@@ -32,6 +32,7 @@ from .folder_scanner import is_video_file
 from .formatting import human_size
 from . import theme
 from .installer import ensure_hakuview_ico
+from .proc import no_window
 
 
 def _format_bitrate(bps: Optional[float | int | str]) -> str:
@@ -78,7 +79,7 @@ def probe_video_ffprobe(path: Path) -> Optional[Dict[str, Any]]:
             "-show_streams",
             str(path),
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=3.0)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=3.0, **no_window())
         if res.returncode == 0 and res.stdout.strip():
             return json.loads(res.stdout)
     except Exception:

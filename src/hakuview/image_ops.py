@@ -17,6 +17,7 @@ from PySide6.QtCore import QObject, QRect, QRunnable, QThreadPool, Qt, Signal
 from PySide6.QtGui import QImage, QImageReader, QImageWriter, QTransform
 
 from .formatting import human_size
+from .proc import no_window
 
 
 def _register_optional_plugins() -> None:
@@ -249,6 +250,7 @@ def _jpegtran_optimize(src_path: Path, out_path: Path) -> None:
         [jpegtran, "-copy", "all", "-optimize", "-progressive", "-outfile", str(out_path), str(src_path)],
         check=False,
         capture_output=True,
+        **no_window(),
     )
     if res.returncode != 0 or not out_path.exists():
         out_path.unlink(missing_ok=True)
@@ -507,6 +509,7 @@ def jpegtran_lossless_save(src: Path, dest: Path, transform: str) -> bool:
             [jpegtran, "-perfect", "-copy", "all", *_JPEGTRAN_ARGS[transform], "-outfile", str(tmp), str(src)],
             capture_output=True,
             check=False,
+            **no_window(),
         )
         if res.returncode != 0 or tmp.stat().st_size == 0:
             return False

@@ -69,6 +69,7 @@ from .image_ops import (
 from .goto_dialog import GoToFileDialog
 from .info_dialog import MediaInfoDialog
 from .installer import ensure_hakuview_ico
+from .proc import gui_python
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
 from . import theme
@@ -1731,7 +1732,7 @@ class HakuViewWindow(QMainWindow):
         current = self.navigator.current_file
         args = ["-m", "hakuview.cli"] + ([str(current)] if current else [])
         if self.close():
-            QProcess.startDetached(sys.executable, args)
+            QProcess.startDetached(gui_python(), args)
 
     def show_about_dialog(self) -> None:
         dialogs.show_about_dialog(self)

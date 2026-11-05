@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+from .proc import no_window
 
 __app_name__ = "HakuView"
 
@@ -33,6 +34,7 @@ def display_version() -> str:
                 text=True,
                 timeout=2,
                 check=False,
+                **no_window(),
             )
             described = res.stdout.strip()
             # Exactly on a release tag (e.g. "v0.3.0"): the version already says it all.
