@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QProcess, QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QProcess, QRect, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QGuiApplication,
     QAction,
@@ -17,6 +17,7 @@ from PySide6.QtGui import (
     QDragEnterEvent,
     QDropEvent,
     QIcon,
+    QImage,
     QKeyEvent,
     QKeySequence,
 )
@@ -79,6 +80,8 @@ from .widgets import FullscreenControls, chevron_icon, menu_position_under, thre
 class HakuViewWindow(QMainWindow):
     """Lightweight, keyboard-driven desktop viewer for images and videos."""
 
+    _colorRendered = Signal(int, object)  # generation, full-resolution adjusted QImage (from a worker thread)
+
     def __init__(
         self,
         initial_path: Optional[Path | str] = None,
@@ -125,6 +128,13 @@ class HakuViewWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._ignore_watch_until = 0.0
+        # Live brightness/contrast: each slider step recolours a screen-sized preview on the UI
+        # thread; the full-resolution result is rendered in the background once the slider rests.
+        self._color_generation = 0
+        self._color_proxy: Optional[tuple] = None  # (source cacheKey, size, scaled QImage)
+        self._color_full_timer = QTimer(self, singleShot=True, interval=150)
+        self._color_full_timer.timeout.connect(self._render_full_color)
+        self._colorRendered.connect(self._on_full_color_rendered)
         self.watcher = QFileSystemWatcher(self)
         self.watcher.fileChanged.connect(self._on_watched_file_changed)
         self.watcher.directoryChanged.connect(self._on_watched_dir_changed)
@@ -390,11 +400,67 @@ class HakuViewWindow(QMainWindow):
         if self.current_is_video:
             self.video_view.set_color_scaling(brightness, contrast)
         elif self.document is not None:
-            self.canvas.set_image(adjust_qimage_color(self.document.current, brightness, contrast), reset_view=False)
+            self._show_color_preview(brightness, contrast)
         self._update_ui_state()
+
+    def _show_color_preview(self, brightness: int, contrast: int) -> None:
+        self._color_generation += 1
+        self._color_full_timer.stop()
+        if brightness == 0 and contrast == 0:
+            self.canvas.set_display_image(None)
+            return
+        preview = self._color_preview_source()
+        self.canvas.set_display_image(adjust_qimage_color(preview, brightness, contrast))
+        if preview is not self.document.current:
+            self._color_full_timer.start()
+
+    def _color_preview_source(self) -> QImage:
+        """The document image scaled to the pixels it covers on screen (the image itself when
+        that is about full size). A 12 MP photo recolours in ~60 ms; its preview in a few ms."""
+        image = self.document.current
+        dpr = self.canvas.devicePixelRatioF()
+        scale = self.canvas.zoom_scale * dpr
+        if scale >= 0.75:
+            return image
+        size = QSize(max(1, round(image.width() * scale)), max(1, round(image.height() * scale)))
+        key = image.cacheKey()
+        if self._color_proxy is None or self._color_proxy[0] != key or self._color_proxy[1] != size:
+            proxy = image.scaled(size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self._color_proxy = (key, size, proxy)
+        return self._color_proxy[2]
+
+    def _render_full_color(self) -> None:
+        if self.document is None or self.current_is_video or self.color_bar.is_neutral:
+            return
+        generation, source = self._color_generation, self.document.current
+        brightness, contrast = self.color_bar.brightness, self.color_bar.contrast
+        emit = self._colorRendered.emit
+
+        def work() -> None:
+            try:
+                emit(generation, adjust_qimage_color(source, brightness, contrast))
+            except RuntimeError:  # window closed meanwhile
+                pass
+
+        QThreadPool.globalInstance().start(work)
+
+    def _on_full_color_rendered(self, generation: int, image: QImage) -> None:
+        # Stale if the sliders moved, the file changed or the image was edited since.
+        if generation == self._color_generation and self.document is not None and not self.current_is_video:
+            self.canvas.set_display_image(image)
+
+    def _show_document(self, reset_view: bool) -> None:
+        """Put the (edited) document on the canvas, keeping any brightness/contrast applied."""
+        self.canvas.set_image(self.document.current, reset_view=reset_view)
+        self._color_proxy = None
+        if not self.color_bar.is_neutral:
+            self._show_color_preview(self.color_bar.brightness, self.color_bar.contrast)
 
     def reset_color_adjustments(self, update_view: bool = True) -> None:
         """Reset brightness and contrast back to 0 (optionally without re-rendering)."""
+        self._color_generation += 1
+        self._color_full_timer.stop()
+        self._color_proxy = None
         self.color_bar.reset()
         if update_view:
             self._on_color_changed(0, 0)
@@ -815,7 +881,7 @@ class HakuViewWindow(QMainWindow):
         if self.document is None or self.current_is_video:
             return
         operation(self.document)
-        self.canvas.set_image(self.document.current, reset_view=reset_view)
+        self._show_document(reset_view)
         self._update_ui_state()
 
     def rotate_left(self) -> None:
@@ -873,7 +939,7 @@ class HakuViewWindow(QMainWindow):
             )
             return False
         if self.document.crop(sel):
-            self.canvas.set_image(self.document.current, reset_view=True)
+            self._show_document(reset_view=True)
             self._update_ui_state()
             self.status.showMessage(
                 f"Cropped to {self.document.current.width()} × {self.document.current.height()} px (Ctrl+S to save, Ctrl+Z to undo)",
@@ -886,7 +952,7 @@ class HakuViewWindow(QMainWindow):
         if self.document is None or self.current_is_video:
             return
         if self.document.undo():
-            self.canvas.set_image(self.document.current, reset_view=True)
+            self._show_document(reset_view=True)
             self._update_ui_state()
             self.status.showMessage("Undid last change.", 2500)
 

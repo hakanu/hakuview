@@ -200,8 +200,13 @@ def apply_color_lut(image: QImage, lut: List[int]) -> QImage:
     rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
     w, h = rgba.width(), rgba.height()
     pil_img = Image.frombuffer("RGBA", (w, h), rgba.constBits(), "raw", "RGBA", rgba.bytesPerLine(), 1)
-    data = pil_img.point(lut * 3 + _IDENTITY_LUT).tobytes()
-    return QImage(data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+    mapped = pil_img.point(lut * 3 + _IDENTITY_LUT)
+    # Paste straight into the result QImage's memory: half the cost of tobytes() + QImage.copy().
+    out = QImage(w, h, QImage.Format.Format_RGBA8888)
+    target = Image.frombuffer("RGBA", (w, h), out.bits(), "raw", "RGBA", out.bytesPerLine(), 1)
+    target.readonly = 0  # write into the buffer instead of copy-on-write
+    target.paste(mapped)
+    return out
 
 
 def adjust_qimage_color(image: QImage, brightness: int, contrast: int) -> QImage:

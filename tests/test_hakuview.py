@@ -1580,3 +1580,37 @@ def test_windows_open_with_registers_hakuview_icon(monkeypatch, tmp_path: Path) 
     left = [p for p in keys if "HakuView" in p or "hakuview" in p]
     assert not left, "\n".join(left)
     assert "HakuView.Image" not in keys[r"Software\Classes\.jpg\OpenWithProgids"]
+
+
+def test_color_sliders_preview_then_render_full_resolution(tmp_path: Path, qtbot) -> None:
+    """Dragging recolours a screen-sized preview; the full-size result arrives once the slider rests."""
+    _create_sample_image(tmp_path / "big.png", width=3000, height=2000, color=QColor(100, 100, 100))
+    win = HakuViewWindow(initial_path=tmp_path / "big.png")
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+    win.resize(700, 500)
+    _show_active(win, qtbot)
+    assert win.canvas.zoom_scale < 0.5  # fit-to-window: the photo is shown much smaller than its pixels
+    win.canvas.select_all()
+    selection = win.canvas.selection
+
+    win.color_bar.slider_brightness.setValue(40)
+    preview = win.canvas._pixmap
+    assert preview.width() < 1500  # recoloured at screen size, not 3000 px wide
+    assert preview.toImage().pixelColor(5, 5).red() > 130
+    assert win.canvas.selection == selection  # adjusting no longer drops the crop box
+    assert win.canvas.image.width() == 3000  # geometry still refers to the real image
+
+    qtbot.waitUntil(lambda: win.canvas._pixmap.width() == 3000, timeout=5000)
+    assert win.canvas._pixmap.toImage().pixelColor(5, 5).red() > 130
+
+    # A stale background result (sliders moved again meanwhile) is ignored.
+    gen = win._color_generation
+    win.color_bar.slider_brightness.setValue(0)
+    win._on_full_color_rendered(gen, QImage(3000, 2000, QImage.Format.Format_RGB32))
+    assert win.canvas._pixmap.toImage().pixelColor(5, 5).red() == 100  # back to the original
+
+    # Edits keep the adjustment on screen.
+    win.color_bar.slider_brightness.setValue(40)
+    win.rotate_right()
+    assert win.canvas._pixmap.toImage().pixelColor(5, 5).red() > 130

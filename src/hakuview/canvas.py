@@ -97,6 +97,16 @@ class ImageCanvas(QWidget):
                 self._recompute_fit_scale()
         self.update()
 
+    def set_display_image(self, image: Optional[QImage]) -> None:
+        """Show other pixels for the current image (a colour-adjusted copy, or a smaller live
+        preview that gets scaled up) without touching zoom, pan or the crop selection.
+        None shows the original again."""
+        if self._image is None or self._image.isNull():
+            return
+        source = image if image is not None and not image.isNull() else self._image
+        self._pixmap = QPixmap.fromImage(source)
+        self.update()
+
     def _on_movie_frame(self) -> None:
         if self._movie is not None:
             frame_img = self._movie.currentImage()
