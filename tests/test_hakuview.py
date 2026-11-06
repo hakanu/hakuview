@@ -1657,3 +1657,341 @@ def test_no_window_flags(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / "pythonw.exe").write_bytes(b"")
     monkeypatch.setattr(sys, "executable", str(python))
     assert proc.gui_python() == str(tmp_path / "pythonw.exe")  # relaunch without a console
+
+
+def test_whatsapp_bitrate_budget_and_worker(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    from hakuview.video_view import (
+        WHATSAPP_DEFAULT_MAXRATE_KBPS,
+        WHATSAPP_MAX_MB,
+        _WhatsAppWorker,
+        whatsapp_target_bitrate_kbps,
+    )
+
+    # 1. Long video (240s) must cap bitrate so total output stays under WHATSAPP_MAX_MB (15 MiB)
+    big_stub = tmp_path / "big.mp4"
+    big_stub.write_bytes(b"\0" * (40 * 1024 * 1024))
+    v_kbps, a_kbps = whatsapp_target_bitrate_kbps(big_stub, duration_sec=240.0)
+    total_mb = (v_kbps + a_kbps) * 240.0 / (8 * 1024)
+    assert total_mb <= WHATSAPP_MAX_MB
+    assert v_kbps < WHATSAPP_DEFAULT_MAXRATE_KBPS
+
+    # 2. Already medium-bitrate video (e.g. 2 MB over 10s = 1600 kbps) gets its bitrate lowered (~65%)
+    med_stub = tmp_path / "med.mp4"
+    med_stub.write_bytes(b"\0" * (2 * 1024 * 1024))
+    v_med, _ = whatsapp_target_bitrate_kbps(med_stub, duration_sec=10.0)
+    assert v_med < 1200
+
+    # 3. End-to-end FFmpeg worker produces an H.264 yuv420p MP4 with even dimensions and smaller size
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    src = tmp_path / "odd_clip.mkv"
+    dest = tmp_path / "odd_clip_whatsapp.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=duration=2:size=321x241:rate=20",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "16",
+            str(src),
+        ],
+        check=True,
+    )
+    done = []
+    worker = _WhatsAppWorker(src, dest, duration_sec=2.0)
+    worker.finished.connect(done.append)
+    worker.run()
+    assert done == [dest]
+    assert dest.exists() and dest.stat().st_size < src.stat().st_size
+
+
+def test_whatsapp_button_and_shortcut_in_video_mode(tmp_path: Path, qtbot, monkeypatch) -> None:
+    win = _video_window(tmp_path, qtbot)
+    assert hasattr(win.video_view, "btn_whatsapp")
+    assert win.video_view.btn_whatsapp.isEnabled()
+    assert win.btn_compress.isEnabled()
+
+    started = []
+
+    def fake_start(job, on_ok, on_err):
+        started.append(job.dest_path)
+        return True
+
+    monkeypatch.setattr(win.video_view, "_start_job", fake_start)
+    win.video_view.btn_whatsapp.click()
+    assert len(started) == 1
+    assert started[0].name == "clip_whatsapp.mp4"
+    assert not win.video_view.btn_whatsapp.isEnabled()
+    assert "WhatsApp" in win.video_view.btn_whatsapp.text()
+
+    # Simulate completion -> button re-enabled and new file added to folder navigation
+    started[0].write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    win.video_view._on_whatsapp_success(started[0])
+    assert win.video_view.btn_whatsapp.isEnabled()
+    assert started[0] in win.navigator.files
+    assert "WhatsApp video saved" in win.status.currentMessage()
+
+
+def test_video_resize_dominant_color_dialog_and_worker(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import json
+    import shutil
+    import subprocess
+    from PySide6.QtWidgets import QDialog
+    from hakuview.video_view import (
+        VideoResizeDialog,
+        _ResizeWorker,
+        build_resize_vf,
+        extract_dominant_color,
+        render_resize_preview,
+    )
+
+    # 1. Dominant color extraction ignores black bars and picks the saturated foreground color
+    vertical_frame = QImage(90, 160, QImage.Format.Format_RGB32)
+    vertical_frame.fill(QColor(0, 0, 0))
+    for y in range(20, 140):
+        for x in range(10, 80):
+            vertical_frame.setPixelColor(x, y, QColor(30, 110, 220))
+    dom = extract_dominant_color(vertical_frame)
+    assert dom.blue() > dom.red() + 40
+
+    # 2. Dialog presets, custom dimensions (auto-evened), swap W/H, and live preview
+    dlg = VideoResizeDialog(frame=vertical_frame)
+    qtbot.addWidget(dlg)
+    assert (dlg.target_width, dlg.target_height) == (1920, 1080)
+    assert dlg.bg_style == "dominant_blur"
+    assert dlg.lbl_preview.pixmap() is not None and not dlg.lbl_preview.pixmap().isNull()
+
+    dlg.swap_dimensions()
+    assert (dlg.target_width, dlg.target_height) == (1080, 1920)
+
+    dlg.spin_width.setValue(1281)  # odd input is rounded down to even for H.264
+    dlg.spin_height.setValue(721)
+    assert (dlg.target_width, dlg.target_height) == (1280, 720)
+    assert dlg.combo_preset.currentData()[0] == "16:9_720p"
+
+    # All background styles produce valid preview images and filtergraphs
+    for style in ("dominant_blur", "ambient_glow", "video_blur", "dominant_solid", "crop"):
+        vf = build_resize_vf(640, 360, bg_style=style, dominant_hex=dom.name(), blur_sigma=28, fg_scale_pct=92)
+        assert "640" in vf and "360" in vf and "yuv420p" in vf
+        prev = render_resize_preview(vertical_frame, 640, 360, bg_style=style, dominant_color=dom, blur_sigma=28, fg_scale_pct=92)
+        assert not prev.isNull() and prev.width() > prev.height()
+
+    # 3. Window integration via btn_resize
+    win = _video_window(tmp_path, qtbot)
+    assert hasattr(win.video_view, "btn_resize")
+    assert win.video_view.btn_resize.isEnabled()
+
+    def accept_720p(self):
+        self.spin_width.setValue(640)
+        self.spin_height.setValue(360)
+        return QDialog.DialogCode.Accepted
+
+    started = []
+    monkeypatch.setattr(VideoResizeDialog, "exec", accept_720p)
+    monkeypatch.setattr(win.video_view, "_start_job", lambda job, ok, err: started.append(job) or True)
+    win.video_view.btn_resize.click()
+    assert len(started) == 1
+    assert started[0].dest_path.name == "clip_640x360.mp4"
+    assert not win.video_view.btn_resize.isEnabled()
+
+    started[0].dest_path.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    win.video_view._on_resize_success(started[0].dest_path)
+    assert win.video_view.btn_resize.isEnabled()
+    assert started[0].dest_path in win.navigator.files
+
+    # 4. End-to-end FFmpeg _ResizeWorker converts a 180x320 vertical clip into a 320x180 landscape MP4
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("ffmpeg/ffprobe not available")
+    src = tmp_path / "vertical.mp4"
+    dest = tmp_path / "vertical_320x180.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=duration=1:size=180x320:rate=15",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+    )
+    done = []
+    worker = _ResizeWorker(src, dest, width=320, height=180, bg_style="dominant_blur", dominant_hex="#1e40af", blur_sigma=24, fg_scale_pct=94)
+    worker.finished.connect(done.append)
+    worker.run()
+    assert done == [dest] and dest.exists()
+    probe = json.loads(
+        subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", str(dest)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    assert (probe["streams"][0]["width"], probe["streams"][0]["height"]) == (320, 180)
+
+
+def test_job_progress_bar_updates_and_cancel_button(tmp_path: Path, qtbot) -> None:
+    import shutil
+    from hakuview.video_view import _TrimWorker
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+
+    win = _video_window(tmp_path, qtbot)
+    vv = win.video_view
+    assert not vv.job_bar.isVisible()
+    assert not win.status_progress.isVisible()
+
+    class _SlowJob(_TrimWorker):
+        label = "Video resize"
+
+        def _attempts(self, ffmpeg):
+            return [([ffmpeg, "-y", "-re", "-f", "lavfi", "-i", "testsrc=duration=10", str(self.dest_path)], 0)]
+
+    dest = tmp_path / "out_resize.mp4"
+    job = _SlowJob(dest, dest, 0, 10000)
+    vv.btn_resize.setEnabled(False)
+    vv.btn_resize.setText("⏳ Resizing...")
+    assert vv._start_job(job, lambda p: None, lambda e: None)
+    assert vv.job_bar.isVisible()
+    assert win.status_progress.isVisible()
+    assert win.lbl_progress.isVisible()
+
+    # Simulate progress updates (0 -> 45 -> 100)
+    vv._on_job_progress(45)
+    assert vv.job_progress.value() == 45
+    assert vv.lbl_job_pct.text() == "45%"
+    assert win.status_progress.value() == 45
+    assert "45%" in win.lbl_progress.text()
+
+    # Clicking Cancel stops the job, hides both progress bars, and restores button state
+    vv.btn_cancel_job.click()
+    assert not vv.is_job_running()
+    assert not vv.job_bar.isVisible()
+    assert not win.status_progress.isVisible()
+    assert vv.btn_resize.isEnabled() and vv.btn_resize.text() == "📐 Resize"
+    assert "Cancelled" in win.status.currentMessage()
+
+
+def test_video_rotate_flip_and_strip_audio(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import json
+    import shutil
+    import subprocess
+    from hakuview.video_view import _StripAudioWorker, _TransformVideoWorker
+
+    win = _video_window(tmp_path, qtbot)
+    assert win.btn_edit.isEnabled()
+    assert win.act_strip_audio.isVisible()
+    assert win.act_resize_video.isVisible()
+
+    started = []
+    monkeypatch.setattr(win.video_view, "_start_job", lambda job, ok, err: started.append(job) or True)
+
+    win.rotate_right()
+    assert isinstance(started[-1], _TransformVideoWorker) and started[-1].transform == "rot_right"
+    assert started[-1].dest_path.name == "clip_rot90.mp4"
+
+    win.rotate_left()
+    assert isinstance(started[-1], _TransformVideoWorker) and started[-1].transform == "rot_left"
+    assert started[-1].dest_path.name == "clip_rot270.mp4"
+
+    win.flip_horizontal()
+    assert isinstance(started[-1], _TransformVideoWorker) and started[-1].transform == "flip_h"
+
+    win.flip_vertical()
+    assert isinstance(started[-1], _TransformVideoWorker) and started[-1].transform == "flip_v"
+
+    win.strip_video_audio()
+    assert isinstance(started[-1], _StripAudioWorker)
+    assert started[-1].dest_path.name == "clip_muted.mp4"
+
+    # Completion signals add the new videos into folder navigation
+    rot_out = tmp_path / "clip_rot90.mp4"
+    rot_out.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    win.video_view.transformCompleted.emit(rot_out, "Rotate 90° right")
+    assert rot_out in win.navigator.files
+    assert "Rotate 90° right" in win.status.currentMessage()
+
+    mute_out = tmp_path / "clip_muted.mp4"
+    mute_out.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    win.video_view.stripAudioCompleted.emit(mute_out)
+    assert mute_out in win.navigator.files
+    assert "Audio-stripped video saved" in win.status.currentMessage()
+
+    # End-to-end FFmpeg verification for rotate 90° and lossless strip audio
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("ffmpeg/ffprobe not available")
+
+    src = tmp_path / "av_clip.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=duration=1:size=160x100:rate=15",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(src),
+        ],
+        check=True,
+    )
+
+    rot_dest = tmp_path / "av_clip_rot_right.mp4"
+    rot_worker = _TransformVideoWorker(src, rot_dest, "rot_right")
+    rot_done = []
+    rot_worker.finished.connect(rot_done.append)
+    rot_worker.run()
+    assert rot_done == [rot_dest] and rot_dest.exists()
+    v_probe = json.loads(
+        subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", str(rot_dest)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    assert (v_probe["streams"][0]["width"], v_probe["streams"][0]["height"]) == (100, 160)
+
+    mute_dest = tmp_path / "av_clip_mute.mp4"
+    mute_worker = _StripAudioWorker(src, mute_dest)
+    mute_done = []
+    mute_worker.finished.connect(mute_done.append)
+    mute_worker.run()
+    assert mute_done == [mute_dest] and mute_dest.exists()
+    a_probe = json.loads(
+        subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "json", str(mute_dest)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    assert a_probe.get("streams", []) == []
+

@@ -46,7 +46,9 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 - ✂️ **Border Crop (`C`)**  
   Press `C` to reveal border handles on the image edges. Pull any side or corner inward and press `C` or `Enter` to crop. (Or simply left-drag a freehand box).
 - 🔄 **Quick Rotate & Flip (`R` / `L` / `H` / `V`)**  
-  Rotate 90° clockwise/counter-clockwise or flip instantly.
+  Rotate 90° clockwise/counter-clockwise or flip horizontally/vertically on both images and videos (`<name>_rot90.mp4`, etc.).
+- 🔇 **1-Click Lossless Audio Strip (`Edit ▾ → Strip Audio`)**  
+  Instantly strip audio from any video (`<name>_muted.mp4`) using FFmpeg stream copy (`-c:v copy -an`) with zero video quality loss.
 - 💾 **Non-Destructive & Safe**  
   Edits stay in memory with a 10-step undo (`Ctrl+Z`). Changes are only saved when you press `Ctrl+S` (atomic write) or `Ctrl+Shift+S` (Save As).
 - 🗜️ **1-Click Image Compression (`K`)**  
@@ -55,6 +57,10 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   Plays MP4, MKV, WebM, MOV, and animated GIFs without switching apps. During slideshows, videos play to completion before auto-advancing.
 - ✂️ **Lossless Video Trimming (`[` / `]` or `I` / `O` + `T`)**  
   Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, then press `T` or click **✂ Trim**. Uses instant FFmpeg stream copy with zero re-encoding and zero quality loss.
+- 📱 **1-Click WhatsApp Web Video Export (`K` or `📱 WhatsApp`)**  
+  Click **📱 WhatsApp** in the video bar (or press `K`) to export `<name>_whatsapp.mp4` with lowered H.264 + AAC bitrate (`yuv420p`, `+faststart`) guaranteed to stay under WhatsApp Web's limit.
+- 📐 **CapCut-Style Video Reframe & Resize (`📐 Resize`)**  
+  Convert vertical videos to landscape (16:9 1080p/720p, 9:16, 1:1, 4:5, 21:9, or custom W×H) with a live preview and automatic dominant-color Gaussian-blurred backdrop, living 4-corner ambient glow, solid dominant fill, or center crop.
 - 🎨 **Color Scaling: Brightness & Contrast (`B`)**  
   Real-time brightness and contrast for images and videos. Save the result as a new image, a single video frame, or a whole new video (`<name>_color.mp4`) — originals are never overwritten.
 - ℹ️ **Geeky Media Inspector (`I` / `Ctrl+I`)**  

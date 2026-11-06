@@ -3,21 +3,29 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import List, Optional
 
-from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QSizeF, QThread, QThreadPool, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QSize, QSizeF, QThread, QThreadPool, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
+    QColorDialog,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSlider,
+    QSpinBox,
     QStackedWidget,
     QStyle,
     QStyleOptionSlider,
@@ -31,6 +39,32 @@ from .proc import no_window
 
 
 PLAYBACK_SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0)
+
+# WhatsApp Web media limit is 16 MB for standard video clips; targeting <= 15 MiB with a capped
+# H.264 bitrate ensures fast uploads and universal playback across desktop and mobile clients.
+WHATSAPP_MAX_MB = 15.0
+WHATSAPP_DEFAULT_MAXRATE_KBPS = 1800
+WHATSAPP_MIN_VIDEO_KBPS = 250
+WHATSAPP_AUDIO_KBPS = 128
+
+VIDEO_SIZE_PRESETS: tuple[tuple[str, str, int, int], ...] = (
+    ("16:9_1080p", "16:9 Landscape — 1920 × 1080 (Full HD)", 1920, 1080),
+    ("16:9_720p", "16:9 Landscape — 1280 × 720 (HD)", 1280, 720),
+    ("9:16_1080p", "9:16 Vertical — 1080 × 1920 (Reels / Shorts / TikTok)", 1080, 1920),
+    ("1:1_1080", "1:1 Square — 1080 × 1080 (Instagram / Feed)", 1080, 1080),
+    ("4:5_1080", "4:5 Portrait — 1080 × 1350 (Social Post)", 1080, 1350),
+    ("4:3_1080", "4:3 Classic — 1440 × 1080", 1440, 1080),
+    ("21:9_1080", "21:9 Ultrawide — 2560 × 1080", 2560, 1080),
+    ("custom", "Custom Resolution (W × H)", 0, 0),
+)
+
+VIDEO_BG_STYLES: tuple[tuple[str, str], ...] = (
+    ("dominant_blur", "✨ Dominant Color + Blurred Video (CapCut Style)"),
+    ("ambient_glow", "🌈 Living Dominant Glow (Dynamic 4-Corner Gradient)"),
+    ("video_blur", "🌫 Pure Blurred Video Backdrop"),
+    ("dominant_solid", "🎨 Dominant Color Solid Fill"),
+    ("crop", "🔍 Zoom & Center-Crop to Fill (No Bars)"),
+)
 
 
 def _format_ms(ms: int) -> str:
@@ -81,10 +115,70 @@ def detect_video_codec(path: Path) -> Optional[str]:
         return None
 
 
+def probe_video_duration_sec(path: Path) -> Optional[float]:
+    """Probe container duration in seconds via ffprobe."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        res = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+            **no_window(),
+        )
+        val = float(res.stdout.strip())
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
+def whatsapp_target_bitrate_kbps(src_path: Path, duration_sec: Optional[float] = None) -> tuple[int, int]:
+    """Compute (video_maxrate_kbps, audio_kbps) to lower bitrate and fit under WhatsApp Web's limit."""
+    if duration_sec is None or duration_sec <= 0:
+        duration_sec = probe_video_duration_sec(src_path)
+
+    audio_kbps = 96 if (duration_sec and duration_sec > 180) else WHATSAPP_AUDIO_KBPS
+    target_v_kbps = WHATSAPP_DEFAULT_MAXRATE_KBPS
+
+    if duration_sec and duration_sec > 0:
+        # 1. Cap total bitrate so the entire output stays safely under WHATSAPP_MAX_MB (15 MiB)
+        total_budget_kbps = int((WHATSAPP_MAX_MB * 1024 * 8) / duration_sec)
+        size_cap_v_kbps = max(WHATSAPP_MIN_VIDEO_KBPS, total_budget_kbps - audio_kbps)
+        target_v_kbps = min(target_v_kbps, size_cap_v_kbps)
+
+        # 2. Also lower the bitrate relative to the source file (~65% of source total bitrate)
+        try:
+            src_bytes = src_path.stat().st_size
+            if src_bytes > 0:
+                src_total_kbps = (src_bytes * 8.0) / (1000.0 * duration_sec)
+                reduced_v_kbps = int(src_total_kbps * 0.65) - audio_kbps
+                target_v_kbps = min(target_v_kbps, max(WHATSAPP_MIN_VIDEO_KBPS, reduced_v_kbps))
+        except OSError:
+            pass
+
+    return max(WHATSAPP_MIN_VIDEO_KBPS, target_v_kbps), audio_kbps
+
+
 class _CodecProbeSignals(QObject):
     """Carries an async ffprobe result (path, codec name) back to the UI thread."""
 
     detected = Signal(str, str)
+
+
+_FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_FFMPEG_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
 class _FfmpegJob(QObject):
@@ -95,16 +189,18 @@ class _FfmpegJob(QObject):
     the job was cancelled (cancellation emits neither `finished` nor `failed`).
     """
 
+    progress = Signal(int)
     finished = Signal(Path)
     failed = Signal(str)
     done = Signal()
 
     label = "FFmpeg job"
 
-    def __init__(self, src_path: Path, dest_path: Path) -> None:
+    def __init__(self, src_path: Path, dest_path: Path, expected_duration_sec: Optional[float] = None) -> None:
         super().__init__()
         self.src_path = src_path
         self.dest_path = dest_path
+        self.expected_duration_sec = expected_duration_sec
         self._proc: Optional[subprocess.Popen] = None
         self._cancelled = False
 
@@ -129,20 +225,47 @@ class _FfmpegJob(QObject):
             self.failed.emit("ffmpeg is not installed on this system.")
             return
         err_msg = ""
+        self.progress.emit(0)
         try:
             for cmd, min_bytes in self._attempts(ffmpeg):
                 if self._cancelled:
                     break
                 self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **no_window())
-                _, stderr = self._proc.communicate()
+                tail = ""
+                total_sec = float(self.expected_duration_sec) if (self.expected_duration_sec and self.expected_duration_sec > 0) else 0.0
+                last_pct = 0
+                if self._proc.stderr is not None:
+                    while True:
+                        chunk = (
+                            self._proc.stderr.read1(512)
+                            if hasattr(self._proc.stderr, "read1")
+                            else self._proc.stderr.read(512)
+                        )
+                        if not chunk:
+                            break
+                        text = chunk.decode("utf-8", errors="replace")
+                        tail = (tail + text)[-1200:]
+                        if total_sec <= 0:
+                            dm = _FFMPEG_DURATION_RE.search(tail)
+                            if dm:
+                                total_sec = int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
+                        if total_sec > 0:
+                            for tm in _FFMPEG_TIME_RE.finditer(text):
+                                cur_sec = int(tm.group(1)) * 3600 + int(tm.group(2)) * 60 + float(tm.group(3))
+                                pct = max(1, min(99, int(round((cur_sec / total_sec) * 100.0))))
+                                if pct != last_pct:
+                                    last_pct = pct
+                                    self.progress.emit(pct)
+                self._proc.wait()
                 if (
                     self._proc.returncode == 0
                     and self.dest_path.exists()
                     and self.dest_path.stat().st_size > min_bytes
                 ):
+                    self.progress.emit(100)
                     self.finished.emit(self.dest_path)
                     return
-                err_msg = stderr.decode("utf-8", errors="replace")[-300:]
+                err_msg = tail[-300:]
         except Exception as exc:
             err_msg = str(exc)
         if self._cancelled:
@@ -176,7 +299,8 @@ class _TrimWorker(_FfmpegJob):
     label = "Trimming"
 
     def __init__(self, src_path: Path, dest_path: Path, start_ms: int, end_ms: int) -> None:
-        super().__init__(src_path, dest_path)
+        clip_sec = max(0.0, (end_ms - start_ms) / 1000.0) if end_ms > start_ms else None
+        super().__init__(src_path, dest_path, expected_duration_sec=clip_sec)
         self.start_ms = start_ms
         self.end_ms = end_ms
 
@@ -226,6 +350,561 @@ class _ColorExportWorker(_FfmpegJob):
             (encode + ["-c:a", "copy", str(self.dest_path)], 0),
             (encode + ["-c:a", "aac", "-b:a", "192k", str(self.dest_path)], 0),
         ]
+
+
+class _WhatsAppWorker(_FfmpegJob):
+    """Re-encodes a video into a WhatsApp Web friendly H.264 + AAC MP4 with lowered bitrate."""
+
+    label = "WhatsApp export"
+
+    def __init__(self, src_path: Path, dest_path: Path, duration_sec: Optional[float] = None) -> None:
+        super().__init__(src_path, dest_path, expected_duration_sec=duration_sec)
+        self.duration_sec = duration_sec
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        v_kbps, a_kbps = whatsapp_target_bitrate_kbps(self.src_path, self.duration_sec)
+        buf_kbps = v_kbps * 2
+        vf = (
+            "scale='if(gt(iw,ih),min(1280,iw),-2)':'if(gt(iw,ih),-2,min(1280,ih))',"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            "format=yuv420p"
+        )
+        cmd = [
+            ffmpeg, "-y", "-i", str(self.src_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-profile:v", "main", "-preset", "fast",
+            "-crf", "26",
+            "-maxrate", f"{v_kbps}k",
+            "-bufsize", f"{buf_kbps}k",
+            "-c:a", "aac", "-b:a", f"{a_kbps}k", "-ac", "2",
+            "-movflags", "+faststart",
+            str(self.dest_path),
+        ]
+        return [(cmd, 0)]
+
+
+def extract_dominant_color(image: Optional[QImage]) -> QColor:
+    """Extract a rich dominant color from a video frame, weighting saturated non-border pixels."""
+    default = QColor("#1e293b")
+    if image is None or image.isNull():
+        return default
+    sample = image.scaled(40, 40, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    sample = sample.convertToFormat(QImage.Format.Format_RGB888)
+    buckets: dict[tuple[int, int, int], list[float]] = {}
+    for y in range(sample.height()):
+        for x in range(sample.width()):
+            c = sample.pixelColor(x, y)
+            r, g, b = c.red(), c.green(), c.blue()
+            luma = 0.299 * r + 0.587 * g + 0.114 * b
+            if luma < 16 or luma > 242:
+                continue  # skip letterbox black bars and blown highlights
+            sat = c.hsvSaturationF()
+            weight = 0.35 + 1.65 * max(0.0, sat)
+            key = (r // 32, g // 32, b // 32)
+            acc = buckets.get(key)
+            if acc is None:
+                buckets[key] = [weight, r * weight, g * weight, b * weight]
+            else:
+                acc[0] += weight
+                acc[1] += r * weight
+                acc[2] += g * weight
+                acc[3] += b * weight
+    if not buckets:
+        return default
+    best = max(buckets.values(), key=lambda item: item[0])
+    w_sum = max(1e-6, best[0])
+    out = QColor(round(best[1] / w_sum), round(best[2] / w_sum), round(best[3] / w_sum))
+    # Keep lightness in a pleasing deep studio range so the foreground video always pops
+    h, s, l, a = out.getHslF()
+    clamped_l = max(0.16, min(0.45, l))
+    boosted_s = min(1.0, s * 1.15) if s > 0.08 else s
+    return QColor.fromHslF(max(0.0, h), boosted_s, clamped_l, a)
+
+
+def build_resize_vf(
+    width: int,
+    height: int,
+    bg_style: str = "dominant_blur",
+    dominant_hex: str = "#1e293b",
+    blur_sigma: int = 32,
+    fg_scale_pct: int = 100,
+) -> str:
+    """Build an FFmpeg -vf filtergraph that reframes/resizes a video with a CapCut-style backdrop."""
+    W = max(64, int(width) - (int(width) % 2))
+    H = max(64, int(height) - (int(height) % 2))
+    hex_rgb = dominant_hex.lstrip("#")
+    if len(hex_rgb) != 6:
+        hex_rgb = "1e293b"
+    sigma = max(2, min(80, int(blur_sigma)))
+    pct = max(60, min(100, int(fg_scale_pct)))
+    fg_w = max(32, int(round(W * pct / 100.0)) // 2 * 2)
+    fg_h = max(32, int(round(H * pct / 100.0)) // 2 * 2)
+
+    if bg_style == "crop":
+        return f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},format=yuv420p"
+
+    if bg_style == "dominant_solid":
+        return (
+            f"scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x{hex_rgb},format=yuv420p"
+        )
+
+    fg_chain = (
+        f"[fg]scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg_out]"
+    )
+
+    if bg_style == "ambient_glow":
+        bg_chain = (
+            f"[bg]scale=4:4:flags=area,"
+            f"scale={W}:{H}:flags=bicubic,"
+            f"gblur=sigma={sigma}:steps=3,"
+            f"drawbox=x=0:y=0:w=iw:h=ih:color=0x{hex_rgb}@0.28:t=fill,"
+            f"eq=brightness=-0.06:saturation=1.3[bg_out]"
+        )
+    elif bg_style == "video_blur":
+        bg_chain = (
+            f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H},"
+            f"gblur=sigma={sigma}:steps=3,"
+            f"eq=brightness=-0.10:saturation=1.15[bg_out]"
+        )
+    else:  # "dominant_blur" (default CapCut style)
+        bg_chain = (
+            f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H},"
+            f"gblur=sigma={sigma}:steps=3,"
+            f"drawbox=x=0:y=0:w=iw:h=ih:color=0x{hex_rgb}@0.38:t=fill,"
+            f"eq=brightness=-0.08:saturation=1.2[bg_out]"
+        )
+
+    return f"split=2[bg][fg];{bg_chain};{fg_chain};[bg_out][fg_out]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
+
+
+def render_resize_preview(
+    frame: Optional[QImage],
+    width: int,
+    height: int,
+    bg_style: str = "dominant_blur",
+    dominant_color: Optional[QColor] = None,
+    blur_sigma: int = 32,
+    fg_scale_pct: int = 100,
+    max_preview_side: int = 440,
+) -> QImage:
+    """Render a fast live preview QImage matching build_resize_vf() for VideoResizeDialog."""
+    W = max(64, int(width))
+    H = max(64, int(height))
+    scale_factor = min(max_preview_side / max(W, H), 1.0)
+    pw = max(48, round(W * scale_factor))
+    ph = max(48, round(H * scale_factor))
+
+    dom = dominant_color if (dominant_color is not None and dominant_color.isValid()) else extract_dominant_color(frame)
+    canvas = QImage(pw, ph, QImage.Format.Format_ARGB32_Premultiplied)
+    canvas.fill(dom)
+
+    if frame is None or frame.isNull():
+        return canvas
+
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    if bg_style == "crop":
+        covered = frame.scaled(pw, ph, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        cx = max(0, (covered.width() - pw) // 2)
+        cy = max(0, (covered.height() - ph) // 2)
+        painter.drawImage(0, 0, covered, cx, cy, pw, ph)
+        painter.end()
+        return canvas
+
+    if bg_style in ("dominant_blur", "video_blur", "ambient_glow"):
+        # Downscale-then-upscale approximates Gaussian blur at zero CPU cost for live slider dragging
+        if bg_style == "ambient_glow":
+            tiny_w, tiny_h = 4, 4
+        else:
+            div = max(4, int(blur_sigma * 0.7))
+            tiny_w = max(4, pw // div)
+            tiny_h = max(4, ph // div)
+        covered = frame.scaled(pw, ph, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        cx = max(0, (covered.width() - pw) // 2)
+        cy = max(0, (covered.height() - ph) // 2)
+        cropped_bg = covered.copy(cx, cy, pw, ph)
+        blurred = cropped_bg.scaled(tiny_w, tiny_h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation).scaled(
+            pw, ph, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        painter.drawImage(0, 0, blurred)
+        if bg_style in ("dominant_blur", "ambient_glow"):
+            tint = QColor(dom)
+            tint.setAlpha(105 if bg_style == "dominant_blur" else 80)
+            painter.fillRect(0, 0, pw, ph, tint)
+        painter.fillRect(0, 0, pw, ph, QColor(0, 0, 0, 32))
+
+    # Draw foreground video frame centered at fg_scale_pct
+    pct = max(60, min(100, int(fg_scale_pct))) / 100.0
+    fg_box = QSize(max(16, round(pw * pct)), max(16, round(ph * pct)))
+    fg_img = frame.scaled(fg_box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    fx = (pw - fg_img.width()) // 2
+    fy = (ph - fg_img.height()) // 2
+
+    # Subtle drop shadow when background is visible around the foreground frame
+    if fg_img.width() < pw or fg_img.height() < ph:
+        painter.fillRect(fx - 2, fy - 2, fg_img.width() + 4, fg_img.height() + 4, QColor(0, 0, 0, 85))
+    painter.drawImage(fx, fy, fg_img)
+    painter.end()
+    return canvas
+
+
+class _ResizeWorker(_FfmpegJob):
+    """Reframes/resizes a video to (width, height) with a blurred/dominant-color backdrop."""
+
+    label = "Video resize"
+
+    def __init__(
+        self,
+        src_path: Path,
+        dest_path: Path,
+        width: int,
+        height: int,
+        bg_style: str = "dominant_blur",
+        dominant_hex: str = "#1e293b",
+        blur_sigma: int = 32,
+        fg_scale_pct: int = 100,
+    ) -> None:
+        super().__init__(src_path, dest_path)
+        self.width = max(64, int(width) - (int(width) % 2))
+        self.height = max(64, int(height) - (int(height) % 2))
+        self.bg_style = bg_style
+        self.dominant_hex = dominant_hex
+        self.blur_sigma = blur_sigma
+        self.fg_scale_pct = fg_scale_pct
+
+    def vf_expression(self) -> str:
+        return build_resize_vf(
+            self.width,
+            self.height,
+            self.bg_style,
+            self.dominant_hex,
+            self.blur_sigma,
+            self.fg_scale_pct,
+        )
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        vf = self.vf_expression()
+        encode = [
+            ffmpeg, "-y", "-i", str(self.src_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+            "-movflags", "+faststart",
+        ]
+        return [
+            (encode + ["-c:a", "copy", str(self.dest_path)], 0),
+            (encode + ["-c:a", "aac", "-b:a", "192k", str(self.dest_path)], 0),
+        ]
+
+
+VIDEO_TRANSFORMS: dict[str, tuple[str, str, str]] = {
+    "rot_right": ("transpose=1,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p", "rot90", "Rotate 90° right"),
+    "rot_left": ("transpose=2,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p", "rot270", "Rotate 90° left"),
+    "flip_h": ("hflip,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p", "fliph", "Flip horizontal"),
+    "flip_v": ("vflip,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p", "flipv", "Flip vertical"),
+}
+
+
+class _TransformVideoWorker(_FfmpegJob):
+    """Rotates (90° left/right) or flips (horizontal/vertical) a video via FFmpeg."""
+
+    def __init__(self, src_path: Path, dest_path: Path, transform: str) -> None:
+        super().__init__(src_path, dest_path)
+        vf, _tag, label = VIDEO_TRANSFORMS[transform]
+        self.transform = transform
+        self.vf = vf
+        self.label = label
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        encode = [
+            ffmpeg, "-y", "-i", str(self.src_path),
+            "-vf", self.vf,
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-movflags", "+faststart",
+        ]
+        return [
+            (encode + ["-c:a", "copy", str(self.dest_path)], 0),
+            (encode + ["-c:a", "aac", "-b:a", "192k", str(self.dest_path)], 0),
+        ]
+
+
+class _StripAudioWorker(_FfmpegJob):
+    """Losslessly strips the audio track from a video (-c:v copy -an), with re-encode fallback."""
+
+    label = "Strip audio"
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        copy_cmd = [
+            ffmpeg, "-y", "-i", str(self.src_path),
+            "-c:v", "copy", "-an",
+            "-movflags", "+faststart",
+            str(self.dest_path),
+        ]
+        reencode_cmd = [
+            ffmpeg, "-y", "-i", str(self.src_path),
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-an",
+            "-movflags", "+faststart",
+            str(self.dest_path),
+        ]
+        return [(copy_cmd, 500), (reencode_cmd, 0)]
+
+
+class VideoResizeDialog(QDialog):
+    """Interactive dialog for reframing/resizing a video with CapCut-style blurred dominant color fill."""
+
+    def __init__(self, frame: Optional[QImage] = None, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("settingsDialog")  # inherits HakuView's dark/light dialog styling
+        self.setWindowTitle("Reframe & Resize Video — HakuView")
+        self.setMinimumWidth(500)
+
+        self._frame = frame
+        self._auto_color = extract_dominant_color(frame)
+        self._dominant_color = QColor(self._auto_color)
+        self._updating_preset = False
+
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+
+        # Live Preview Box
+        preview_group = QGroupBox("Live Canvas Preview", self)
+        preview_layout = QVBoxLayout(preview_group)
+        self.lbl_preview = QLabel(self)
+        self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_preview.setMinimumSize(440, 250)
+        preview_layout.addWidget(self.lbl_preview)
+        self.lbl_summary = QLabel("", self)
+        self.lbl_summary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_layout.addWidget(self.lbl_summary)
+        root.addWidget(preview_group)
+
+        # Target Size / Aspect Ratio Group
+        size_group = QGroupBox("Target Resolution && Aspect Ratio", self)
+        size_form = QFormLayout(size_group)
+
+        self.combo_preset = QComboBox(self)
+        for preset_id, label, w, h in VIDEO_SIZE_PRESETS:
+            self.combo_preset.addItem(label, (preset_id, w, h))
+        size_form.addRow("Size preset", self.combo_preset)
+
+        dims_row = QHBoxLayout()
+        self.spin_width = QSpinBox(self)
+        self.spin_width.setRange(64, 3840)
+        self.spin_width.setSingleStep(2)
+        self.spin_width.setSuffix(" px")
+        self.spin_width.setValue(1920)
+        self.spin_height = QSpinBox(self)
+        self.spin_height.setRange(64, 3840)
+        self.spin_height.setSingleStep(2)
+        self.spin_height.setSuffix(" px")
+        self.spin_height.setValue(1080)
+        self.btn_swap = QPushButton("⇄ Swap W/H", self)
+        self.btn_swap.setToolTip("Swap Width and Height (e.g. 1920×1080 ↔ 1080×1920)")
+        self.btn_swap.clicked.connect(self.swap_dimensions)
+        dims_row.addWidget(QLabel("W:", self))
+        dims_row.addWidget(self.spin_width, stretch=1)
+        dims_row.addWidget(QLabel("×  H:", self))
+        dims_row.addWidget(self.spin_height, stretch=1)
+        dims_row.addWidget(self.btn_swap)
+        size_form.addRow("Dimensions", dims_row)
+        root.addWidget(size_group)
+
+        # Background Fill Group
+        bg_group = QGroupBox("Background Fill (CapCut Canvas Style)", self)
+        bg_form = QFormLayout(bg_group)
+
+        self.combo_bg = QComboBox(self)
+        for style_id, label in VIDEO_BG_STYLES:
+            self.combo_bg.addItem(label, style_id)
+        bg_form.addRow("Fill style", self.combo_bg)
+
+        color_row = QHBoxLayout()
+        self.btn_pick_color = QPushButton(self)
+        self.btn_pick_color.setToolTip("Click to customize the dominant background color")
+        self.btn_pick_color.clicked.connect(self._choose_color)
+        self.btn_auto_color = QPushButton("Auto from Video", self)
+        self.btn_auto_color.setToolTip("Reset to the dominant color automatically extracted from the video")
+        self.btn_auto_color.clicked.connect(self._reset_auto_color)
+        color_row.addWidget(self.btn_pick_color, stretch=1)
+        color_row.addWidget(self.btn_auto_color)
+        bg_form.addRow("Dominant color", color_row)
+
+        blur_row = QHBoxLayout()
+        self.slider_blur = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider_blur.setRange(6, 64)
+        self.slider_blur.setValue(32)
+        self.lbl_blur = QLabel("32", self)
+        self.lbl_blur.setFixedWidth(32)
+        blur_row.addWidget(self.slider_blur, stretch=1)
+        blur_row.addWidget(self.lbl_blur)
+        bg_form.addRow("Blur strength", blur_row)
+
+        scale_row = QHBoxLayout()
+        self.slider_fg_scale = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider_fg_scale.setRange(70, 100)
+        self.slider_fg_scale.setValue(100)
+        self.lbl_fg_scale = QLabel("100%", self)
+        self.lbl_fg_scale.setFixedWidth(40)
+        scale_row.addWidget(self.slider_fg_scale, stretch=1)
+        scale_row.addWidget(self.lbl_fg_scale)
+        bg_form.addRow("Foreground fit", scale_row)
+        root.addWidget(bg_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("🎬 Export Resized Video")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        # Connections
+        self.combo_preset.currentIndexChanged.connect(self._on_preset_changed)
+        self.spin_width.valueChanged.connect(self._on_dims_edited)
+        self.spin_height.valueChanged.connect(self._on_dims_edited)
+        self.combo_bg.currentIndexChanged.connect(self._refresh_preview)
+        self.slider_blur.valueChanged.connect(self._on_blur_changed)
+        self.slider_fg_scale.valueChanged.connect(self._on_fg_scale_changed)
+
+        self._update_color_button()
+        self._refresh_preview()
+
+    @property
+    def target_width(self) -> int:
+        val = self.spin_width.value()
+        return max(64, val - (val % 2))
+
+    @property
+    def target_height(self) -> int:
+        val = self.spin_height.value()
+        return max(64, val - (val % 2))
+
+    @property
+    def bg_style(self) -> str:
+        return str(self.combo_bg.currentData() or "dominant_blur")
+
+    @property
+    def dominant_color(self) -> QColor:
+        return QColor(self._dominant_color)
+
+    @property
+    def dominant_hex(self) -> str:
+        return self._dominant_color.name()
+
+    @property
+    def blur_sigma(self) -> int:
+        return int(self.slider_blur.value())
+
+    @property
+    def fg_scale_pct(self) -> int:
+        return int(self.slider_fg_scale.value())
+
+    def swap_dimensions(self) -> None:
+        w, h = self.spin_width.value(), self.spin_height.value()
+        self.spin_width.blockSignals(True)
+        self.spin_height.blockSignals(True)
+        self.spin_width.setValue(h)
+        self.spin_height.setValue(w)
+        self.spin_width.blockSignals(False)
+        self.spin_height.blockSignals(False)
+        self._sync_preset_to_dims()
+        self._refresh_preview()
+
+    def _on_preset_changed(self, index: int) -> None:
+        if self._updating_preset:
+            return
+        data = self.combo_preset.itemData(index)
+        if not data:
+            return
+        _preset_id, w, h = data
+        if w > 0 and h > 0:
+            self._updating_preset = True
+            self.spin_width.setValue(w)
+            self.spin_height.setValue(h)
+            self._updating_preset = False
+            self._refresh_preview()
+
+    def _on_dims_edited(self) -> None:
+        if self._updating_preset:
+            return
+        self._sync_preset_to_dims()
+        self._refresh_preview()
+
+    def _sync_preset_to_dims(self) -> None:
+        w, h = self.target_width, self.target_height
+        self._updating_preset = True
+        matched_idx = self.combo_preset.count() - 1  # default to "custom"
+        for i in range(self.combo_preset.count()):
+            data = self.combo_preset.itemData(i)
+            if data and data[1] == w and data[2] == h:
+                matched_idx = i
+                break
+        self.combo_preset.setCurrentIndex(matched_idx)
+        self._updating_preset = False
+
+    def _on_blur_changed(self, value: int) -> None:
+        self.lbl_blur.setText(str(value))
+        self._refresh_preview()
+
+    def _on_fg_scale_changed(self, value: int) -> None:
+        self.lbl_fg_scale.setText(f"{value}%")
+        self._refresh_preview()
+
+    def _choose_color(self) -> None:
+        chosen = QColorDialog.getColor(self._dominant_color, self, "Select Dominant Background Color")
+        if chosen.isValid():
+            self._dominant_color = chosen
+            self._update_color_button()
+            self._refresh_preview()
+
+    def _reset_auto_color(self) -> None:
+        self._dominant_color = QColor(self._auto_color)
+        self._update_color_button()
+        self._refresh_preview()
+
+    def _update_color_button(self) -> None:
+        hex_code = self._dominant_color.name().upper()
+        luma = (
+            0.299 * self._dominant_color.red()
+            + 0.587 * self._dominant_color.green()
+            + 0.114 * self._dominant_color.blue()
+        )
+        fg = "#0f172a" if luma > 140 else "#f8fafc"
+        self.btn_pick_color.setText(f"🎨 {hex_code}")
+        self.btn_pick_color.setStyleSheet(
+            f"background-color: {hex_code}; color: {fg}; font-weight: bold; border-radius: 4px; padding: 4px 10px;"
+        )
+
+    def _refresh_preview(self) -> None:
+        style = self.bg_style
+        uses_blur = style in ("dominant_blur", "ambient_glow", "video_blur")
+        uses_color = style in ("dominant_blur", "ambient_glow", "dominant_solid")
+        self.slider_blur.setEnabled(uses_blur)
+        self.btn_pick_color.setEnabled(uses_color)
+        self.btn_auto_color.setEnabled(uses_color)
+        self.slider_fg_scale.setEnabled(style != "crop")
+
+        preview_img = render_resize_preview(
+            self._frame,
+            self.target_width,
+            self.target_height,
+            bg_style=style,
+            dominant_color=self._dominant_color,
+            blur_sigma=self.blur_sigma,
+            fg_scale_pct=self.fg_scale_pct,
+        )
+        self.lbl_preview.setPixmap(QPixmap.fromImage(preview_img))
+        src_info = (
+            f"{self._frame.width()} × {self._frame.height()} px  →  "
+            if (self._frame is not None and not self._frame.isNull())
+            else ""
+        )
+        self.lbl_summary.setText(f"{src_info}{self.target_width} × {self.target_height} px  ({self.dominant_hex.upper()})")
 
 
 class ClickableSlider(QSlider):
@@ -437,8 +1116,16 @@ class VideoPlayerWidget(QWidget):
     doubleClicked = Signal()
     transcodeCompleted = Signal(Path)
     trimCompleted = Signal(Path)
+    whatsappCompleted = Signal(Path)
+    resizeCompleted = Signal(Path)
+    transformCompleted = Signal(Path, str)
+    stripAudioCompleted = Signal(Path)
     colorExportCompleted = Signal(Path)
     colorExportFailed = Signal(str)
+    jobStarted = Signal(str)
+    jobProgress = Signal(str, int)
+    jobEnded = Signal()
+    jobCancelled = Signal(str)
     playbackFailed = Signal(str)  # user-facing message
     infoRequested = Signal()
 
@@ -475,8 +1162,8 @@ class VideoPlayerWidget(QWidget):
         self.controls_bar = QWidget(self)
         self.controls_bar.setObjectName("videoControls")  # styled by theme.APP_QSS
         bar_layout = QHBoxLayout(self.controls_bar)
-        bar_layout.setContentsMargins(10, 6, 10, 6)
-        bar_layout.setSpacing(8)
+        bar_layout.setContentsMargins(8, 5, 8, 5)
+        bar_layout.setSpacing(5)
 
         self.play_btn = QPushButton("⏸ Pause")
         self.play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -522,9 +1209,25 @@ class VideoPlayerWidget(QWidget):
         self.btn_clear_trim.clicked.connect(self.clear_trim)
         bar_layout.addWidget(self.btn_clear_trim)
 
+        self.btn_whatsapp = QPushButton("📱 WhatsApp")
+        self.btn_whatsapp.setToolTip(
+            "Export a WhatsApp Web friendly MP4 (lowered bitrate, H.264 + AAC, under 16 MB limit) (Shortcut: K)"
+        )
+        self.btn_whatsapp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_whatsapp.clicked.connect(self.export_whatsapp)
+        bar_layout.addWidget(self.btn_whatsapp)
+
+        self.btn_resize = QPushButton("📐 Resize")
+        self.btn_resize.setToolTip(
+            "Reframe & Resize Video: convert vertical ↔ landscape with CapCut-style blurred dominant color backdrop"
+        )
+        self.btn_resize.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_resize.clicked.connect(self.open_resize_dialog)
+        bar_layout.addWidget(self.btn_resize)
+
         self.mute_btn = QPushButton("🔊")
         self.mute_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.mute_btn.setFixedWidth(38)
+        self.mute_btn.setFixedWidth(32)
         self.mute_btn.clicked.connect(self.toggle_mute)
         bar_layout.addWidget(self.mute_btn)
 
@@ -532,7 +1235,7 @@ class VideoPlayerWidget(QWidget):
         self.volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
-        self.volume_slider.setFixedWidth(85)
+        self.volume_slider.setFixedWidth(68)
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
         bar_layout.addWidget(self.volume_slider)
 
@@ -565,18 +1268,44 @@ class VideoPlayerWidget(QWidget):
         banner_layout.addWidget(self.btn_transcode)
 
         self._current_path: Optional[Path] = None
-        # At most one ffmpeg job (trim or transcode) runs at a time.
+        # At most one ffmpeg job (trim, transcode, WhatsApp, resize, color) runs at a time.
         self._job: Optional[_FfmpegJob] = None
         self._job_thread: Optional[QThread] = None
+        self._job_desc: str = ""
         self._finished_emitted: bool = False
         self._codec_probe = _CodecProbeSignals(self)
         self._codec_probe.detected.connect(self._on_codec_detected)
+
+        # Background job progress strip (shown above transport controls while FFmpeg is working)
+        self.job_bar = QWidget(self)
+        self.job_bar.setObjectName("videoJobBar")
+        self.job_bar.setVisible(False)
+        job_layout = QHBoxLayout(self.job_bar)
+        job_layout.setContentsMargins(10, 4, 10, 4)
+        job_layout.setSpacing(8)
+        self.lbl_job = QLabel("", self.job_bar)
+        self.job_progress = QProgressBar(self.job_bar)
+        self.job_progress.setTextVisible(False)
+        self.job_progress.setFixedHeight(8)
+        self.lbl_job_pct = QLabel("", self.job_bar)
+        self.lbl_job_pct.setObjectName("jobPctLabel")
+        self.lbl_job_pct.setFixedWidth(44)
+        self.lbl_job_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.btn_cancel_job = QPushButton("✕ Cancel", self.job_bar)
+        self.btn_cancel_job.setToolTip("Cancel the running video export")
+        self.btn_cancel_job.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_cancel_job.clicked.connect(self.cancel_active_job)
+        job_layout.addWidget(self.lbl_job)
+        job_layout.addWidget(self.job_progress, stretch=1)
+        job_layout.addWidget(self.lbl_job_pct)
+        job_layout.addWidget(self.btn_cancel_job)
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self.banner)
         root_layout.addWidget(self.video_stack, stretch=1)
+        root_layout.addWidget(self.job_bar)
         root_layout.addWidget(self.controls_bar)
 
         # Signals
@@ -625,9 +1354,18 @@ class VideoPlayerWidget(QWidget):
         if self._job is not None:
             QMessageBox.information(self, "Busy", "Another video export is still running. Please wait for it to finish.")
             return False
+        if job.expected_duration_sec is None and self.player.duration() > 0:
+            job.expected_duration_sec = self.player.duration() / 1000.0
+        self._job_desc = f"{job.label}: {job.dest_path.name}"
+        self.lbl_job.setText(f"⏳ {self._job_desc}")
+        self.lbl_job_pct.setText("...")
+        self.job_progress.setRange(0, 0)  # pulsing indeterminate bar until the first percentage arrives
+        self.job_bar.setVisible(True)
+
         thread = QThread(self)
         job.moveToThread(thread)
         thread.started.connect(job.run)
+        job.progress.connect(self._on_job_progress)
         job.finished.connect(on_success)
         job.failed.connect(on_failure)
         job.done.connect(thread.quit)
@@ -635,12 +1373,51 @@ class VideoPlayerWidget(QWidget):
         thread.finished.connect(job.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._job, self._job_thread = job, thread
+        self.jobStarted.emit(self._job_desc)
         thread.start()
         return True
+
+    def _on_job_progress(self, pct: int) -> None:
+        if pct <= 0:
+            self.job_progress.setRange(0, 0)
+            self.lbl_job_pct.setText("...")
+        else:
+            self.job_progress.setRange(0, 100)
+            self.job_progress.setValue(pct)
+            self.lbl_job_pct.setText(f"{pct}%")
+        self.jobProgress.emit(self._job_desc, pct)
 
     def _on_job_thread_finished(self) -> None:
         self._job = None
         self._job_thread = None
+        self.job_bar.setVisible(False)
+        self.jobEnded.emit()
+
+    def _restore_job_buttons(self) -> None:
+        self.btn_whatsapp.setEnabled(True)
+        self.btn_whatsapp.setText("📱 WhatsApp")
+        self.btn_resize.setEnabled(True)
+        self.btn_resize.setText("📐 Resize")
+        self.btn_transcode.setEnabled(True)
+        self.btn_transcode.setText("⚡ Convert to MP4 (H.264)")
+        self._update_trim_ui()
+
+    def cancel_active_job(self) -> bool:
+        """Cancel the currently running background FFmpeg job and restore button states."""
+        job, thread = self._job, self._job_thread
+        if job is None or thread is None:
+            return False
+        label = job.label
+        job.cancel()
+        thread.quit()
+        thread.wait(3000)
+        self._job = None
+        self._job_thread = None
+        self.job_bar.setVisible(False)
+        self._restore_job_buttons()
+        self.jobEnded.emit()
+        self.jobCancelled.emit(label)
+        return True
 
     def shutdown(self) -> None:
         """Cancel any running ffmpeg job and wait for its thread (call before the app exits)."""
@@ -651,6 +1428,7 @@ class VideoPlayerWidget(QWidget):
             thread.wait(5000)
         self._job = None
         self._job_thread = None
+        self.job_bar.setVisible(False)
 
     def _on_transcode_clicked(self) -> None:
         if self._current_path is None:
@@ -758,6 +1536,118 @@ class VideoPlayerWidget(QWidget):
     def _on_trim_failed(self, error: str) -> None:
         self._update_trim_ui()
         QMessageBox.warning(self, "Trim Error", error)
+
+    def export_whatsapp(self) -> Optional[Path]:
+        """Export a WhatsApp Web friendly MP4 (<name>_whatsapp.mp4) with lowered bitrate."""
+        if self._current_path is None:
+            return None
+        dest_path = _next_variant_path(self._current_path, "whatsapp", ".mp4")
+        dur_ms = self.player.duration()
+        duration_sec = (dur_ms / 1000.0) if dur_ms > 0 else None
+        job = _WhatsAppWorker(self._current_path, dest_path, duration_sec=duration_sec)
+        if not self._start_job(job, self._on_whatsapp_success, self._on_whatsapp_failed):
+            return None
+        self.btn_whatsapp.setEnabled(False)
+        self.btn_whatsapp.setText("⏳ WhatsApp...")
+        return dest_path
+
+    def _on_whatsapp_success(self, new_path: Path) -> None:
+        self.btn_whatsapp.setEnabled(True)
+        self.btn_whatsapp.setText("📱 WhatsApp")
+        self.whatsappCompleted.emit(new_path)
+
+    def _on_whatsapp_failed(self, error: str) -> None:
+        self.btn_whatsapp.setEnabled(True)
+        self.btn_whatsapp.setText("📱 WhatsApp")
+        QMessageBox.warning(self, "WhatsApp Export Error", error)
+
+    def open_resize_dialog(self) -> Optional[Path]:
+        """Open the interactive CapCut-style video resize/reframe dialog and start export if accepted."""
+        if self._current_path is None:
+            return None
+        frame = self.grab_current_frame()
+        dlg = VideoResizeDialog(frame=frame, parent=self.window() or self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return self.export_resized(
+            width=dlg.target_width,
+            height=dlg.target_height,
+            bg_style=dlg.bg_style,
+            dominant_hex=dlg.dominant_hex,
+            blur_sigma=dlg.blur_sigma,
+            fg_scale_pct=dlg.fg_scale_pct,
+        )
+
+    def export_resized(
+        self,
+        width: int,
+        height: int,
+        bg_style: str = "dominant_blur",
+        dominant_hex: str = "#1e293b",
+        blur_sigma: int = 32,
+        fg_scale_pct: int = 100,
+    ) -> Optional[Path]:
+        """Start writing <name>_<W>x<H>.mp4 with the chosen backdrop in a background FFmpeg job."""
+        if self._current_path is None:
+            return None
+        w = max(64, int(width) - (int(width) % 2))
+        h = max(64, int(height) - (int(height) % 2))
+        dest_path = _next_variant_path(self._current_path, f"{w}x{h}", ".mp4")
+        job = _ResizeWorker(
+            self._current_path,
+            dest_path,
+            width=w,
+            height=h,
+            bg_style=bg_style,
+            dominant_hex=dominant_hex,
+            blur_sigma=blur_sigma,
+            fg_scale_pct=fg_scale_pct,
+        )
+        if not self._start_job(job, self._on_resize_success, self._on_resize_failed):
+            return None
+        self.btn_resize.setEnabled(False)
+        self.btn_resize.setText("⏳ Resizing...")
+        return dest_path
+
+    def _on_resize_success(self, new_path: Path) -> None:
+        self.btn_resize.setEnabled(True)
+        self.btn_resize.setText("📐 Resize")
+        self.resizeCompleted.emit(new_path)
+
+    def _on_resize_failed(self, error: str) -> None:
+        self.btn_resize.setEnabled(True)
+        self.btn_resize.setText("📐 Resize")
+        QMessageBox.warning(self, "Video Resize Error", error)
+
+    def transform_video(self, transform: str) -> Optional[Path]:
+        """Rotate or flip the current video (rot_right, rot_left, flip_h, flip_v) and save as <name>_<tag>.mp4."""
+        if self._current_path is None or transform not in VIDEO_TRANSFORMS:
+            return None
+        _vf, tag, label = VIDEO_TRANSFORMS[transform]
+        dest_path = _next_variant_path(self._current_path, tag, ".mp4")
+        job = _TransformVideoWorker(self._current_path, dest_path, transform=transform)
+        if not self._start_job(
+            job,
+            lambda p, lbl=label: self.transformCompleted.emit(p, lbl),
+            lambda err: QMessageBox.warning(self, "Video Transform Error", err),
+        ):
+            return None
+        return dest_path
+
+    def strip_audio(self) -> Optional[Path]:
+        """Losslessly strip the audio track from the current video and save as <name>_muted.<ext>."""
+        if self._current_path is None:
+            return None
+        ext = self._current_path.suffix if self._current_path.suffix else ".mp4"
+        dest_path = _next_variant_path(self._current_path, "muted", ext)
+        job = _StripAudioWorker(self._current_path, dest_path)
+        if not self._start_job(
+            job,
+            self.stripAudioCompleted.emit,
+            lambda err: QMessageBox.warning(self, "Strip Audio Error", err),
+        ):
+            return None
+        return dest_path
 
     def export_color_adjusted(self, brightness: int, contrast: int) -> Optional[Path]:
         """Start writing <name>_color.mp4 with the adjustment baked in. Returns the target path if started."""

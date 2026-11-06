@@ -431,14 +431,33 @@ _APP_QSS_TEMPLATE = """
     }
     #colorBar QPushButton#btnSaveAdj:hover { background-color: @accent_dark; }
 
-    /* ---- Video transport bar ---- */
+    /* ---- Video transport bar & job progress bar ---- */
+    #videoJobBar {
+        background-color: @panel;
+        border-top: 1px solid @border_subtle;
+    }
+    #videoJobBar QLabel { color: @text; font-size: 12px; }
+    #videoJobBar QLabel#jobPctLabel { color: @accent; font-weight: bold; font-family: monospace; }
+    #videoJobBar QPushButton {
+        background-color: @surface;
+        border: 1px solid @border;
+        border-radius: 4px;
+        padding: 2px 8px;
+        color: @text;
+        font-size: 11px;
+    }
+    #videoJobBar QPushButton:hover {
+        background-color: @danger;
+        border-color: @danger_soft;
+        color: #ffffff;
+    }
     #videoControls { background-color: @video_bar; }
     #videoControls QLabel { color: @text; font-size: 12px; }
     #videoControls QPushButton {
         background-color: @video_button;
         border: 1px solid @video_button_border;
         border-radius: 4px;
-        padding: 4px 10px;
+        padding: 4px 7px;
         color: @text_bright;
         font-size: 12px;
     }

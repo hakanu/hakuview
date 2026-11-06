@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QStackedWidget,
@@ -252,8 +253,16 @@ class HakuViewWindow(QMainWindow):
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
         self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
         self.video_view.trimCompleted.connect(self._on_video_trimmed)
+        self.video_view.whatsappCompleted.connect(self._on_video_whatsapp_done)
+        self.video_view.resizeCompleted.connect(self._on_video_resized)
+        self.video_view.transformCompleted.connect(self._on_video_transformed)
+        self.video_view.stripAudioCompleted.connect(self._on_video_audio_stripped)
         self.video_view.colorExportCompleted.connect(self._on_color_export_done)
         self.video_view.colorExportFailed.connect(self._on_color_export_failed)
+        self.video_view.jobStarted.connect(self._on_bg_job_started)
+        self.video_view.jobProgress.connect(self._on_bg_job_progress)
+        self.video_view.jobEnded.connect(self._on_bg_job_ended)
+        self.video_view.jobCancelled.connect(self._on_bg_job_cancelled)
         self.video_view.infoRequested.connect(self.show_media_info_dialog)
         self.video_view.playbackFailed.connect(lambda msg: self.status.showMessage(f"⚠ {msg}", 8000))
         self.canvas.wheelNavigate.connect(lambda step: self.next_item() if step > 0 else self.prev_item())
@@ -277,13 +286,16 @@ class HakuViewWindow(QMainWindow):
         self.btn_next = self._add_tb_button("Next ▶", self.next_item, "Next file in folder", "→")
         self.toolbar.addSeparator()
 
-        # Edit ▾ : rotate / flip live in one dropdown to keep the toolbar short.
+        # Edit ▾ : rotate / flip (and video audio/resize tools) live in one dropdown to keep the toolbar short.
         self.edit_menu = QMenu(self)
         self.edit_menu.addAction("↺  Rotate Left 90°   (L)", self.rotate_left)
         self.edit_menu.addAction("↻  Rotate Right 90°   (R)", self.rotate_right)
         self.edit_menu.addAction("⇆  Flip Horizontal   (H)", self.flip_horizontal)
         self.edit_menu.addAction("⇅  Flip Vertical   (V)", self.flip_vertical)
-        self.btn_edit = self._add_tb_dropdown("Edit", "Rotate and flip the image", self.edit_menu, "editMenuButton")
+        self._edit_video_sep = self.edit_menu.addSeparator()
+        self.act_strip_audio = self.edit_menu.addAction("🔇  Strip Audio (Lossless)", self.strip_video_audio)
+        self.act_resize_video = self.edit_menu.addAction("📐  Resize && Reframe Video...", self.resize_video_dialog)
+        self.btn_edit = self._add_tb_dropdown("Edit", "Rotate and flip image or video", self.edit_menu, "editMenuButton")
         self.btn_crop = self._add_tb_button(
             "✂ Crop",
             self.trigger_crop_action,
@@ -382,9 +394,18 @@ class HakuViewWindow(QMainWindow):
         self.lbl_zoom = QLabel("")
         self.lbl_modified = QLabel("")
         self.lbl_modified.setObjectName("modifiedLabel")
+        self.lbl_progress = QLabel("")
+        self.lbl_progress.setObjectName("modifiedLabel")
+        self.lbl_progress.setVisible(False)
+        self.status_progress = QProgressBar(self.status)
+        self.status_progress.setTextVisible(False)
+        self.status_progress.setFixedSize(120, 8)
+        self.status_progress.setVisible(False)
 
         self.status.addWidget(self.lbl_position)
         self.status.addWidget(self.lbl_filename, 1)
+        self.status.addPermanentWidget(self.lbl_progress)
+        self.status.addPermanentWidget(self.status_progress)
         self.status.addPermanentWidget(self.lbl_modified)
         self.status.addPermanentWidget(self.lbl_dimensions)
         self.status.addPermanentWidget(self.lbl_zoom)
@@ -440,7 +461,7 @@ class HakuViewWindow(QMainWindow):
         def work() -> None:
             try:
                 emit(generation, adjust_qimage_color(source, brightness, contrast))
-            except RuntimeError:  # window closed meanwhile
+            except (RuntimeError, TypeError):  # window closed meanwhile
                 pass
 
         QThreadPool.globalInstance().start(work)
@@ -563,7 +584,7 @@ class HakuViewWindow(QMainWindow):
             (("C",), self.trigger_crop_action, "C", "Border Crop (drag borders, then C or Enter)"),
             (("Ctrl+Y",), self.apply_crop, "Ctrl+Y", "Apply crop selection"),
             (("B",), self.toggle_color_bar, "B", "Brightness / Contrast panel"),
-            (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress & save as variant"),
+            (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress (or WhatsApp Web video export)"),
             (("W", "F5"), self.toggle_slideshow, "W / F5", "Toggle Slideshow"),
             (("[",), self._on_key_bracket_left, "[ / ]", "Video: mark In / Out — Images: slideshow faster / slower"),
             (("]",), self._on_key_bracket_right, None, None),
@@ -886,16 +907,34 @@ class HakuViewWindow(QMainWindow):
         self._update_ui_state()
 
     def rotate_left(self) -> None:
+        if self.current_is_video:
+            self.video_view.transform_video("rot_left")
+            return
         self._apply_edit(ImageDocument.rotate_left, reset_view=True)
 
     def rotate_right(self) -> None:
+        if self.current_is_video:
+            self.video_view.transform_video("rot_right")
+            return
         self._apply_edit(ImageDocument.rotate_right, reset_view=True)
 
     def flip_horizontal(self) -> None:
+        if self.current_is_video:
+            self.video_view.transform_video("flip_h")
+            return
         self._apply_edit(ImageDocument.flip_horizontal, reset_view=False)
 
     def flip_vertical(self) -> None:
+        if self.current_is_video:
+            self.video_view.transform_video("flip_v")
+            return
         self._apply_edit(ImageDocument.flip_vertical, reset_view=False)
+
+    def strip_video_audio(self) -> Optional[Path]:
+        """Losslessly strip the audio track from the current video (-c:v copy -an)."""
+        if not self.current_is_video:
+            return None
+        return self.video_view.strip_audio()
 
     def trigger_crop_action(self) -> bool:
         """Toggle border crop handles with C (for image), or export trim (for video)."""
@@ -1033,10 +1072,13 @@ class HakuViewWindow(QMainWindow):
             return False
 
     def compress_current_variant(self) -> Optional[Path]:
-        """One-click compress the current image and save as a new variant in the same folder."""
-        if self.document is None or self.current_is_video:
+        """One-click compress the current image (or export WhatsApp-friendly video) as a variant in the same folder."""
+        if self.current_is_video:
+            return self.export_whatsapp_video()
+        if self.document is None:
             return None
         mode = self.compress_mode
+        self._begin_busy_status("🗜 Compressing...")
         try:
             variant_path, orig_bytes, new_bytes = compress_image_as_variant(self.document, mode=mode)
             # Re-scan folder so the new variant is included in folder navigation while keeping current file active
@@ -1059,6 +1101,8 @@ class HakuViewWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Compression Error", f"Failed to compress image:\n{exc}")
             return None
+        finally:
+            self._end_busy_status()
 
     def _confirm_discard_or_save(self) -> bool:
         """If the current image has unsaved edits, ask whether to Save, Discard, or Cancel."""
@@ -1353,6 +1397,49 @@ class HakuViewWindow(QMainWindow):
     def _on_video_trimmed(self, new_clip_path: Path) -> None:
         self._add_new_file_to_folder(new_clip_path, "✂ Trimmed video saved")
 
+    def export_whatsapp_video(self) -> Optional[Path]:
+        """Export a WhatsApp Web friendly MP4 with lowered bitrate in the background."""
+        if not self.current_is_video:
+            return None
+        target = self.video_view.export_whatsapp()
+        if target is not None:
+            self.status.showMessage(f"⏳ Exporting WhatsApp Web friendly video ({target.name})...", 5000)
+        return target
+
+    def _on_video_whatsapp_done(self, new_path: Path) -> None:
+        cur = self.navigator.current_file
+        stats = ""
+        try:
+            new_bytes = new_path.stat().st_size
+            orig_bytes = cur.stat().st_size if cur is not None and cur.exists() else 0
+            if orig_bytes > 0:
+                diff_pct = ((new_bytes - orig_bytes) / orig_bytes) * 100.0
+                sign = "+" if diff_pct > 0 else ""
+                stats = f" [{human_size(orig_bytes)} → {human_size(new_bytes)} ({sign}{diff_pct:.1f}%)]"
+            elif new_bytes > 0:
+                stats = f" [{human_size(new_bytes)}]"
+        except OSError:
+            pass
+        self._add_new_file_to_folder(new_path, f"📱 WhatsApp video saved{stats}")
+
+    def resize_video_dialog(self) -> Optional[Path]:
+        """Open the CapCut-style video resize/reframe dialog and start background export."""
+        if not self.current_is_video:
+            return None
+        target = self.video_view.open_resize_dialog()
+        if target is not None:
+            self.status.showMessage(f"⏳ Resizing & reframing video ({target.name}) in the background...", 5000)
+        return target
+
+    def _on_video_resized(self, new_path: Path) -> None:
+        self._add_new_file_to_folder(new_path, "📐 Resized video saved")
+
+    def _on_video_transformed(self, new_path: Path, label: str) -> None:
+        self._add_new_file_to_folder(new_path, f"🔄 {label} video saved")
+
+    def _on_video_audio_stripped(self, new_path: Path) -> None:
+        self._add_new_file_to_folder(new_path, "🔇 Audio-stripped video saved")
+
     def export_adjusted_video(self) -> Optional[Path]:
         """Write a copy of the current video with the brightness/contrast baked in (background ffmpeg)."""
         if not self.current_is_video:
@@ -1373,6 +1460,41 @@ class HakuViewWindow(QMainWindow):
     def _on_color_export_failed(self, error: str) -> None:
         self.color_bar.set_exporting(False)
         QMessageBox.warning(self, "Video Export Error", error)
+
+    def _begin_busy_status(self, label: str) -> None:
+        self.lbl_progress.setText(label)
+        self.lbl_progress.setVisible(True)
+        self.status_progress.setRange(0, 0)
+        self.status_progress.setVisible(True)
+        QApplication.processEvents()
+
+    def _end_busy_status(self) -> None:
+        if not self.video_view.is_job_running():
+            self.lbl_progress.setVisible(False)
+            self.status_progress.setVisible(False)
+
+    def _on_bg_job_started(self, desc: str) -> None:
+        self.lbl_progress.setText(f"⏳ {desc}")
+        self.lbl_progress.setVisible(True)
+        self.status_progress.setRange(0, 0)
+        self.status_progress.setVisible(True)
+
+    def _on_bg_job_progress(self, desc: str, pct: int) -> None:
+        if pct <= 0:
+            self.lbl_progress.setText(f"⏳ {desc}")
+            self.status_progress.setRange(0, 0)
+        else:
+            self.lbl_progress.setText(f"⏳ {desc} ({pct}%)")
+            self.status_progress.setRange(0, 100)
+            self.status_progress.setValue(pct)
+
+    def _on_bg_job_ended(self) -> None:
+        self.lbl_progress.setVisible(False)
+        self.status_progress.setVisible(False)
+
+    def _on_bg_job_cancelled(self, label: str) -> None:
+        self.color_bar.set_exporting(False)
+        self.status.showMessage(f"⏹ Cancelled {label.lower()}.", 3500)
 
     def toggle_fullscreen(self) -> None:
         # Toolbars / status bar / overlay follow in changeEvent, which also covers the
@@ -1455,15 +1577,25 @@ class HakuViewWindow(QMainWindow):
         self.btn_next.setEnabled(self.navigator.count > 1)
         self.btn_color.setEnabled(has_file)
 
-        self.btn_edit.setEnabled(is_img)
+        self.btn_edit.setEnabled(is_img or is_vid)
+        self._edit_video_sep.setVisible(bool(is_vid))
+        self.act_strip_audio.setVisible(bool(is_vid))
+        self.act_resize_video.setVisible(bool(is_vid))
         self.btn_crop.setEnabled(is_img or is_vid)
         if is_vid:
             self.btn_crop.setText("✂ Trim")
             self.btn_crop.setToolTip("Export the marked clip with FFmpeg: mark In / Out with [ / ] or I / O, then press T  (T)")
+            self.btn_compress.setToolTip(
+                "Export a WhatsApp Web friendly MP4 (lowered bitrate, H.264 + AAC, under 16 MB limit)  (K)"
+            )
         else:
             self.btn_crop.setText("✂ Crop")
             self.btn_crop.setToolTip("Show border crop handles (or drag a box), then press C or Enter to apply the crop  (C)")
-        self.btn_compress.setEnabled(is_img)
+            label = next((name for name, m in COMPRESSION_MODES if m == self.compress_mode), COMPRESSION_MODES[0][0])
+            self.btn_compress.setToolTip(
+                f"Compress & save as a variant in the same folder  (K)\nPreset: {label} — arrow to change"
+            )
+        self.btn_compress.setEnabled(is_img or is_vid)
         self.btn_fit.setEnabled(is_img)
         self.btn_actual.setEnabled(is_img)
         self.btn_info.setEnabled(has_file)
@@ -1564,6 +1696,9 @@ class HakuViewWindow(QMainWindow):
         add("📋 Copy Image (Ctrl+C)", self.copy_image_to_clipboard, is_img or is_vid, file_menu)
         if is_vid:
             add("🖼 Save Current Frame (S)", self.save_video_frame, True, file_menu)
+            add("📱 Export WhatsApp Video (K)", self.export_whatsapp_video, True, file_menu)
+            add("📐 Resize && Reframe Video...", self.resize_video_dialog, True, file_menu)
+            add("🔇 Strip Audio (Lossless)", self.strip_video_audio, True, file_menu)
         add("Copy File Path (Ctrl+Shift+C)", self.copy_file_path, has_file, file_menu)
         add("✏ Rename... (F2)", self.rename_current_file, has_file, file_menu)
         add("Show in File Manager", self.show_in_file_manager, has_file, file_menu)
