@@ -1,10 +1,27 @@
 # HakuView 🦉
 
 > **Fast, lightweight IrfanView-inspired image and video viewer for Ubuntu & Windows.**  
-> Open any image from the middle of a folder, cycle with arrow keys, border-crop, rotate, compress, trim videos, and run slideshows without lag.
+> Open any image from the middle of a folder, cycle with arrow keys, border-crop, mash up images with floating paste & stamp, add pill captions, blur/pixelate faces, reframe 9:16 videos to 16:9 landscape, trim videos losslessly, and run slideshows without lag.
+
+🌐 **Website & Live Video Showcase:** **[https://hakanu.github.io/hakuview/](https://hakanu.github.io/hakuview/)**
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="HakuView Screenshot" width="820" />
+  <a href="https://hakanu.github.io/hakuview/">
+    <img src="docs/assets/screen-paste.png" alt="HakuView Floating Paste & Stamp" width="840" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="docs/assets/demo.mp4">🎥 <b>Watch the Full Feature Demo Video (<code>docs/assets/demo.mp4</code>)</b></a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/screen-caption.png" alt="Caption & Pill Text Overlay" width="415" />
+  <img src="docs/assets/screen-erase.png" alt="Delete / Pixelate Face Region" width="415" />
+</p>
+<p align="center">
+  <img src="docs/assets/screen-resize.png" alt="CapCut-Style Video Reframe" width="415" />
+  <img src="docs/assets/screen-crop.png" alt="Border-Drag Crop" width="415" />
 </p>
 
 ---

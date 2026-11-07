@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HakuView 🦉 — Ultra-Fast Image & Video Viewer with Superpowers</title>
+  <meta name="description" content="A lightning-fast desktop image & video viewer with border-drag crop, floating image mashups, face/object redaction, pill captions, CapCut-style vertical-to-landscape video reframe, and 1-click WhatsApp Web export." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #070b14;
+      --bg-card: #0f172a;
+      --bg-elevated: #1e293b;
+      --border: rgba(148, 163, 184, 0.16);
+      --border-accent: rgba(56, 189, 248, 0.45);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-strong: #0284c7;
+      --accent-glow: rgba(56, 189, 248, 0.18);
+      --emerald: #34d399;
+      --amber: #facc15;
+      --rose: #fb7185;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(circle at 18% 0%, rgba(2, 132, 199, 0.18), transparent 42%),
+        radial-gradient(circle at 82% 8%, rgba(52, 211, 153, 0.10), transparent 36%);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Navbar */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(14px);
+      background: rgba(7, 11, 20, 0.8);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 68px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 1.25rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+
+    .brand-badge {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.14);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      font-size: 0.92rem;
+      font-weight: 500;
+    }
+
+    .nav-links a {
+      color: var(--text-muted);
+      transition: color 0.15s ease;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+    }
+
+    .btn-github {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-elevated);
+      color: var(--text) !important;
+      border: 1px solid var(--border);
+      padding: 8px 16px;
+      border-radius: 10px;
+      font-weight: 600;
+      transition: all 0.15s ease;
+    }
+
+    .btn-github:hover {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.12);
+    }
+
+    /* Hero */
+    .hero {
+      padding: 72px 0 48px;
+      text-align: center;
+    }
+
+    .pill-banner {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      color: var(--accent);
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 22px;
+    }
+
+    .hero h1 {
+      font-size: clamp(2.4rem, 5vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.12;
+      max-width: 920px;
+      margin: 0 auto 20px;
+    }
+
+    .hero h1 span {
+      background: linear-gradient(135deg, #38bdf8 0%, #818cf8 55%, #34d399 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero p.subtitle {
+      font-size: clamp(1.05rem, 2vw, 1.25rem);
+      color: var(--text-muted);
+      max-width: 760px;
+      margin: 0 auto 34px;
+    }
+
+    /* Install Box */
+    .install-wrap {
+      max-width: 780px;
+      margin: 0 auto 44px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-accent);
+      border-radius: 14px;
+      padding: 16px 20px;
+      box-shadow: 0 20px 50px rgba(2, 132, 199, 0.15);
+      text-align: left;
+    }
+
+    .install-tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 12px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .install-tab {
+      cursor: pointer;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid transparent;
+      transition: all 0.15s ease;
+    }
+
+    .install-tab.active {
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.12);
+      border-color: rgba(56, 189, 248, 0.3);
+    }
+
+    .cmd-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: #050811;
+      padding: 12px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.88rem;
+      color: #e2e8f0;
+      overflow-x: auto;
+    }
+
+    .cmd-row code {
+      white-space: nowrap;
+    }
+
+    .cmd-prompt {
+      color: var(--emerald);
+      user-select: none;
+      margin-right: 8px;
+    }
+
+    .copy-btn {
+      background: var(--accent-strong);
+      color: #fff;
+      border: none;
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.15s ease;
+    }
+
+    .copy-btn:hover {
+      background: var(--accent);
+      color: #070b14;
+    }
+
+    /* Demo Video Showcase */
+    .video-frame {
+      position: relative;
+      max-width: 1080px;
+      margin: 0 auto;
+      border-radius: 18px;
+      overflow: hidden;
+      border: 1px solid var(--border-accent);
+      background: #050811;
+      box-shadow: 0 30px 90px rgba(2, 132, 199, 0.24);
+    }
+
+    .video-frame video {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .video-caption {
+      margin-top: 14px;
+      font-size: 0.86rem;
+      color: var(--text-muted);
+    }
+
+    /* Feature Grid */
+    .section {
+      padding: 84px 0;
+    }
+
+    .section-header {
+      text-align: center;
+      max-width: 720px;
+      margin: 0 auto 56px;
+    }
+
+    .section-header h2 {
+      font-size: clamp(1.85rem, 3.5vw, 2.6rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+
+    .section-header p {
+      color: var(--text-muted);
+      font-size: 1.05rem;
+    }
+
+    .feature-showcase {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 48px;
+    }
+
+    .feature-row {
+      display: grid;
+      grid-template-columns: 1.05fr 1.35fr;
+      gap: 36px;
+      align-items: center;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 32px;
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .feature-row:hover {
+      border-color: var(--border-accent);
+      transform: translateY(-2px);
+    }
+
+    .feature-row.reverse {
+      grid-template-columns: 1.35fr 1.05fr;
+    }
+
+    .feature-row.reverse .feature-copy {
+      order: 2;
+    }
+
+    .feature-row.reverse .feature-media {
+      order: 1;
+    }
+
+    .feature-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.12);
+      padding: 4px 11px;
+      border-radius: 999px;
+      margin-bottom: 14px;
+    }
+
+    .feature-copy h3 {
+      font-size: 1.6rem;
+      font-weight: 800;
+      margin-bottom: 12px;
+      letter-spacing: -0.02em;
+    }
+
+    .feature-copy p {
+      color: var(--text-muted);
+      margin-bottom: 18px;
+      font-size: 0.98rem;
+    }
+
+    .feature-bullets {
+      list-style: none;
+      display: grid;
+      gap: 8px;
+      font-size: 0.92rem;
+      color: #cbd5e1;
+    }
+
+    .feature-bullets li::before {
+      content: "✦ ";
+      color: var(--accent);
+      font-weight: bold;
+    }
+
+    .feature-media img {
+      width: 100%;
+      height: auto;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+      display: block;
+    }
+
+    /* Extra Power Cards */
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+      margin-top: 36px;
+    }
+
+    .mini-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+    }
+
+    .mini-card h4 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .mini-card p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* Shortcuts Table */
+    .shortcuts-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      overflow: hidden;
+      max-width: 920px;
+      margin: 0 auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th, td {
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.93rem;
+    }
+
+    th {
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.78rem;
+      letter-spacing: 0.05em;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    kbd {
+      display: inline-block;
+      padding: 3px 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 6px;
+      margin-right: 4px;
+    }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 42px 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+    }
+
+    @media (max-width: 900px) {
+      .feature-row,
+      .feature-row.reverse {
+        grid-template-columns: 1fr;
+        padding: 22px;
+      }
+      .feature-row.reverse .feature-copy {
+        order: 1;
+      }
+      .feature-row.reverse .feature-media {
+        order: 2;
+      }
+      .nav-links a:not(.btn-github) {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="container nav">
+      <a href="#" class="brand">
+        <span>🦉 HakuView</span>
+        <span class="brand-badge">v0.1 • PySide6 + FFmpeg</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#demo">Live Demo</a>
+        <a href="#features">Features</a>
+        <a href="#shortcuts">Shortcuts</a>
+        <a href="https://github.com/hakanu/hakuview" class="btn-github" target="_blank" rel="noopener">
+          ★ Star on GitHub
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero -->
+    <section class="hero container">
+      <div class="pill-banner">
+        ⚡ Instant Startup • Zero-Bloat • Linux / macOS / Windows
+      </div>
+      <h1>
+        The Fast Image &amp; Video Viewer with <span>Built-In Superpowers</span>
+      </h1>
+      <p class="subtitle">
+        Browse folders at 60fps, drag borders to crop, mash up images with floating paste &amp; stamp, blur or pixelate faces, add CapCut-style pill captions, and reframe 9:16 vertical videos to 16:9 landscape in one click.
+      </p>
+
+      <!-- 1-Liner Install -->
+      <div class="install-wrap">
+        <div class="install-tabs">
+          <span class="install-tab active" onclick="setCmd('install', this)">🚀 Install + Desktop App Icon</span>
+          <span class="install-tab" onclick="setCmd('uvx', this)">⚡ Run Instantly (Zero Install)</span>
+        </div>
+        <div class="cmd-row">
+          <code><span class="cmd-prompt">$</span><span id="cmd-text">uv tool install git+https://github.com/hakanu/hakuview.git &amp;&amp; hakuview --install-desktop</span></code>
+          <button class="copy-btn" onclick="copyInstall(this)">Copy</button>
+        </div>
+      </div>
+
+      <!-- Recorded Video Showcase -->
+      <div id="demo" class="video-frame">
+        <video src="assets/demo.mp4" poster="assets/screen-hero.png" autoplay loop muted playsinline controls></video>
+      </div>
+      <p class="video-caption">
+        🎥 Recorded live in HakuView with Pexels stock photos &amp; vertical video — showing Border Crop, Pill Captions, Floating Paste &amp; Stamp, Face Pixelation, and CapCut-Style Video Reframe.
+      </p>
+    </section>
+
+    <!-- Deep-Dive Feature Showcases -->
+    <section id="features" class="section container">
+      <div class="section-header">
+        <h2>Everything You Wish Your Default Viewer Could Do</h2>
+        <p>No waiting 15 seconds for Photoshop or Premiere to boot just for a quick crop, meme caption, face blur, or WhatsApp video fix.</p>
+      </div>
+
+      <div class="feature-showcase">
+
+        <!-- 1. Floating Paste & Stamp -->
+        <div class="feature-row">
+          <div class="feature-copy">
+            <span class="feature-tag">📌 Floating Paste &amp; Stamp • Ctrl+V</span>
+            <h3>Mash Up Multiple Images Right on the Canvas</h3>
+            <p>
+              Copy any image from your browser, screenshot tool, or file manager and press <kbd>Ctrl+V</kbd> (or <kbd>Shift+Drop</kbd>) to float it directly over the current photo.
+            </p>
+            <ul class="feature-bullets">
+              <li>Drag inside to move, or drag the 8 handles to resize freely</li>
+              <li>Live sliders for <strong>Opacity %</strong>, <strong>Rounded Corners</strong>, and <strong>White Frame + Drop Shadow</strong></li>
+              <li>Press <kbd>Enter</kbd> to stamp and chain more images, or 1-click <strong>◫ Side-by-Side</strong> / <strong>⊟ Stack Below</strong></li>
+            </ul>
+          </div>
+          <div class="feature-media">
+            <img src="assets/screen-paste.png" alt="Floating Paste and Stamp in HakuView" loading="lazy" />
+          </div>
+        </div>
+
+        <!-- 2. Caption & Pill Text -->
+        <div class="feature-row reverse">
+          <div class="feature-copy">
+            <span class="feature-tag">💬 Caption &amp; Pill Text • Press A</span>
+            <h3>CapCut &amp; Reels-Style Captions for Photos &amp; Videos</h3>
+            <p>
+              Add crisp multi-line text overlays with customizable fonts, sizes, colors, and background boxes — rendered non-destructively onto photos or burned into videos via FFmpeg.
+            </p>
+            <ul class="feature-bullets">
+              <li>5 curated presets including <strong>Viral Yellow Pill</strong>, <strong>Cinema Subtitle</strong>, and <strong>Classic Meme Impact</strong></li>
+              <li>Rounded pill background, full-width banner strip, or bold outline stroke</li>
+              <li>9-point snap placement grid + optional video In/Out timestamp range</li>
+            </ul>
+          </div>
+          <div class="feature-media">
+            <img src="assets/screen-caption.png" alt="Caption and Text Overlay Dialog in HakuView" loading="lazy" />
+          </div>
+        </div>
+
+        <!-- 3. Erase / Blur / Redact Region -->
+        <div class="feature-row">
+          <div class="feature-copy">
+            <span class="feature-tag">🧹 Delete / Redact Region • X or Del</span>
+            <h3>Blur Faces, Pixelate License Plates, or Heal Blemishes</h3>
+            <p>
+              Select a region in Crop mode and hit <kbd>Delete</kbd> (or press <kbd>X</kbd> anytime) to scrub out unwanted faces, private text, or watermarks on both images and videos.
+            </p>
+            <ul class="feature-bullets">
+              <li><strong>Heavy Gaussian Blur</strong> &amp; <strong>Pixelate / Mosaic Censor</strong> for privacy redaction</li>
+              <li><strong>Smart Heal (Inpaint / FFmpeg Delogo)</strong> seamlessly interpolates surrounding pixels</li>
+              <li><strong>Solid Blackout</strong> or <strong>Auto-Sampled Color Patch</strong> for clean document redaction</li>
+            </ul>
+          </div>
+          <div class="feature-media">
+            <img src="assets/screen-erase.png" alt="Delete and Pixelate Face Region in HakuView" loading="lazy" />
+          </div>
+        </div>
+
+        <!-- 4. CapCut-Style Video Reframe -->
+        <div class="feature-row reverse">
+          <div class="feature-copy">
+            <span class="feature-tag">📐 Video Reframe &amp; Resize</span>
+            <h3>Convert 9:16 Vertical Videos to 16:9 Landscape with Blurred Backdrop</h3>
+            <p>
+              Turn vertical phone clips into widescreen 16:9 (or 1:1 Square / 4:5 Instagram) without ugly black bars — complete with automatic K-Means dominant color extraction and Gaussian-blurred background fill.
+            </p>
+            <ul class="feature-bullets">
+              <li>5 backdrop styles: <strong>Dominant Color + Blur</strong>, <strong>4-Corner Living Ambient Glow</strong>, <strong>Pure Blurred Video</strong>, <strong>Solid Fill</strong>, and <strong>Center Crop</strong></li>
+              <li>Live interactive canvas preview with adjustable blur sigma &amp; foreground scale</li>
+              <li>Indeterminate-to-percentage live FFmpeg progress bar with instant cancel</li>
+            </ul>
+          </div>
+          <div class="feature-media">
+            <img src="assets/screen-resize.png" alt="CapCut Style Video Reframe Dialog in HakuView" loading="lazy" />
+          </div>
+        </div>
+
+        <!-- 5. Border-Drag Crop & Geeky Inspector -->
+        <div class="feature-row">
+          <div class="feature-copy">
+            <span class="feature-tag">✂ Border-Drag Crop &amp; ℹ️ Media Inspector</span>
+            <h3>Tactile Border Cropping &amp; Deep Codec Diagnostics</h3>
+            <p>
+              Press <kbd>C</kbd> to pull any edge or corner inward with live Rule-of-Thirds guides, or press <kbd>I</kbd> to inspect true uncompressed-vs-file compression ratios, BPP efficiency, and stream bitrates.
+            </p>
+            <ul class="feature-bullets">
+              <li><strong>1-Click WhatsApp Web Export (<kbd>K</kbd>)</strong>: H.264 High@L4.0 + yuv420p + AAC + faststart under 16 MB</li>
+              <li><strong>Lossless Video Trim (<kbd>[</kbd> / <kbd>]</kbd> + <kbd>T</kbd>)</strong> &amp; <strong>1-Click Strip Audio (🔇)</strong></li>
+              <li><strong>Live Color Bar (<kbd>L</kbd>)</strong>: Brightness, Contrast, Saturation &amp; Auto-Enhance</li>
+            </ul>
+          </div>
+          <div class="feature-media">
+            <img src="assets/screen-crop.png" alt="Border-Drag Crop in HakuView" loading="lazy" />
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Bonus Feature Grid -->
+      <div class="cards-grid">
+        <div class="mini-card">
+          <h4>📱 WhatsApp Web Video Fix</h4>
+          <p>Press <kbd>K</kbd> to transcode any stubborn MKV/HEVC/WebM clip into strict WhatsApp-compatible MP4 with automatic 2-pass size targeting.</p>
+        </div>
+        <div class="mini-card">
+          <h4>🔄 Video Rotate &amp; Flip</h4>
+          <p>Fix sideways phone videos with <kbd>R</kbd> / <kbd>L</kbd> / <kbd>H</kbd> / <kbd>V</kbd> and export with live progress feedback.</p>
+        </div>
+        <div class="mini-card">
+          <h4>🗜️ Target-KB Image Compress</h4>
+          <p>Dial a quality slider or enter an exact target KB budget (e.g. 200 KB for web forms) with binary-search JPEG/WebP/PNG encoding.</p>
+        </div>
+        <div class="mini-card">
+          <h4>🖥️ 1-Command Desktop Integration</h4>
+          <p>Run <code>hakuview --install-desktop</code> once to register file associations and custom Owl icons on Linux, macOS, and Windows.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Keyboard Shortcuts -->
+    <section id="shortcuts" class="section container">
+      <div class="section-header">
+        <h2>Keyboard-First Workflow</h2>
+        <p>Every tool in HakuView is reachable with a single keystroke.</p>
+      </div>
+
+      <div class="shortcuts-card">
+        <table>
+          <thead>
+            <tr>
+              <th>Shortcut</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><kbd>←</kbd> <kbd>→</kbd> / <kbd>Home</kbd> <kbd>End</kbd></td>
+              <td>Previous / Next / First / Last media file in folder</td>
+            </tr>
+            <tr>
+              <td><kbd>C</kbd> then <kbd>Enter</kbd></td>
+              <td>Toggle Border-Drag Crop mode &amp; apply crop</td>
+            </tr>
+            <tr>
+              <td><kbd>A</kbd> or <kbd>Shift+T</kbd></td>
+              <td>Open Caption / Pill Text Overlay dialog (Images &amp; Videos)</td>
+            </tr>
+            <tr>
+              <td><kbd>Ctrl+V</kbd> / <kbd>Ctrl+Shift+V</kbd></td>
+              <td>Floating Paste from clipboard / Paste Image from File to mash up</td>
+            </tr>
+            <tr>
+              <td><kbd>X</kbd> or <kbd>Delete</kbd></td>
+              <td>Erase / Blur / Pixelate / Smart-Heal selected region</td>
+            </tr>
+            <tr>
+              <td><kbd>R</kbd> / <kbd>H</kbd> / <kbd>V</kbd></td>
+              <td>Rotate 90° CW / Flip Horizontal / Flip Vertical (Images &amp; Videos)</td>
+            </tr>
+            <tr>
+              <td><kbd>L</kbd></td>
+              <td>Toggle Live Color Adjustment Bar (Brightness, Contrast, Saturation)</td>
+            </tr>
+            <tr>
+              <td><kbd>[</kbd> / <kbd>]</kbd> then <kbd>T</kbd></td>
+              <td>Set Video Trim In / Out points and export lossless clip</td>
+            </tr>
+            <tr>
+              <td><kbd>K</kbd></td>
+              <td>1-Click WhatsApp Web Compatible MP4 Export (&lt; 16 MB)</td>
+            </tr>
+            <tr>
+              <td><kbd>I</kbd> / <kbd>F11</kbd> / <kbd>Ctrl+Z</kbd></td>
+              <td>Geeky Media Inspector / Fullscreen / Multi-step Undo</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>
+        Built with ❤️ using Python, PySide6 &amp; FFmpeg •
+        <a href="https://github.com/hakanu/hakuview" target="_blank" rel="noopener">GitHub Repository</a> •
+        Demo photos courtesy of <a href="https://www.pexels.com" target="_blank" rel="noopener">Pexels</a>
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    const CMDS = {
+      install: "uv tool install git+https://github.com/hakanu/hakuview.git && hakuview --install-desktop",
+      uvx: "uvx --from git+https://github.com/hakanu/hakuview.git hakuview ."
+    };
+
+    function setCmd(key, el) {
+      document.getElementById("cmd-text").textContent = CMDS[key];
+      document.querySelectorAll(".install-tab").forEach(t => t.classList.remove("active"));
+      el.classList.add("active");
+    }
+
+    function copyInstall(btn) {
+      const txt = document.getElementById("cmd-text").textContent;
+      navigator.clipboard.writeText(txt).then(() => {
+        const old = btn.textContent;
+        btn.textContent = "✓ Copied!";
+        setTimeout(() => { btn.textContent = old; }, 1600);
+      });
+    }
+  </script>
+</body>
+</html>
