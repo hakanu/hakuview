@@ -128,6 +128,27 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 
 ---
 
+## 🆚 How HakuView Compares
+
+Why use **HakuView** instead of traditional viewers (**IrfanView**, **XnView MP**), paint tools (**KolourPaint**, **Windows Paint**), or heavy video editors (**CapCut**)?
+
+| Feature / Workflow | 🦉 **HakuView** | **IrfanView** | **XnView MP** | **KolourPaint** | **Windows Paint** | **CapCut Desktop** |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **OS Support** | **Linux, Windows, macOS** | Windows only | Linux, Win, macOS | Linux (KDE) | Windows only | Win, macOS |
+| **License & Price** | **Open Source (MIT)** | Freeware (Closed) | Freeware (Closed) | Open Source (BSD) | Proprietary | Freemium (Paid Pro) |
+| **Instant `< 100ms` Folder Cycling (`←`/`→`)** | ✅ **Yes (Preloaded)** | ✅ Yes | ✅ Yes | ❌ No (Editor only) | ❌ No (Editor only) | ❌ No (Project import) |
+| **Video Playback in Same Window** | ✅ **Yes (Qt6/FFmpeg)** | ⚠️ Needs plugins | ✅ Yes | ❌ No | ❌ No | ✅ Yes (Heavy timeline) |
+| **Tactile Border-Drag Crop (`C`)** | ✅ **Yes** | ⚠️ Box select + menu | ⚠️ Box select + menu | ⚠️ Box select | ⚠️ Box select | ✅ Yes |
+| **Floating Paste & Stamp Mashup (`Ctrl+V`)** | ✅ **Yes (Opacity, Corners, Frame, Stitch)** | ❌ Overwrites or fixed paste | ❌ Basic clipboard | ⚠️ Basic raster paste | ⚠️ Basic raster paste | ✅ Full layers (Heavy) |
+| **CapCut/Reels Pill Captions (Images & Videos)** | ✅ **Yes (`A`)** | ⚠️ Basic text dialog (Images only) | ⚠️ Images only | ⚠️ Basic text box | ⚠️ Basic text box | ✅ Yes |
+| **Face / Object Blur, Pixelate & Smart Heal** | ✅ **Yes (Images & Videos w/ Delogo)** | ⚠️ Blur selection (Images only) | ⚠️ Images only | ❌ Manual smudge | ❌ Manual erase | ⚠️ Paid / keyframes |
+| **9:16 → 16:9 Blurred-Backdrop Video Reframe** | ✅ **Yes (Free, 5 Styles)** | ❌ No | ❌ No | ❌ No | ❌ No | 💰 **Paid Pro feature** |
+| **Lossless Video Trim (`[`/`]` + `T`) & Mute** | ✅ **Yes (Instant stream copy)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ Always re-encodes |
+| **1-Click WhatsApp Web Video Fix (`< 16 MB`)** | ✅ **Yes (`K`)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ Manual export settings |
+| **Geeky Codec / BPP / EXIF Inspector (`I`)** | ✅ **Yes** | ✅ Yes (`I`) | ✅ Yes | ❌ No | ❌ No | ❌ Basic info |
+
+---
+
 ## 📦 Supported Formats
 
 - **Images**: JPEG, PNG, WebP (static & animated), GIF, BMP, TIFF, SVG, ICO, AVIF, HEIC (HEIC needs the optional `pillow-heif`: `uv tool install --force --with pillow-heif git+https://github.com/hakanu/hakuview.git`)
