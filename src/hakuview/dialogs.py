@@ -67,11 +67,16 @@ def show_about_dialog(parent: QWidget) -> None:
     box.setIconPixmap(QIcon(str(ensure_hakuview_ico())).pixmap(64, 64))
     box.setText(
         f"<h3>🦉 {__app_name__} <span style='font-size: 13px; color: {accent};'>v{display_version()}</span></h3>"
-        "<p>Fast, lightweight IrfanView-inspired image & video viewer for Ubuntu & Windows.</p>"
-        "<p><b>Features:</b> Instant middle-of-folder cycling, border crop, rotate, "
-        "1-click compression, hardware-accelerated video playback, and slideshows.</p>"
-        f"<p><b>GitHub:</b> <a href='https://github.com/hakanu/hakuview' style='color: {accent};'>github.com/hakanu/hakuview</a><br>"
-        f"<b>Author / Twitter:</b> <a href='https://x.com/hakanu_' style='color: {accent};'>x.com/hakanu_</a><br>"
+        "<p>Ultra-fast, lightweight IrfanView-inspired image &amp; video viewer with built-in editing superpowers for Linux, macOS &amp; Windows.</p>"
+        "<p><b>Features:</b> Instant middle-of-folder cycling, border-drag crop, floating paste &amp; stamp image mashups, "
+        "CapCut/Reels-style pill captions, face/object blur &amp; pixelation (smart heal/delogo), "
+        "9:16 → 16:9 blurred-backdrop video reframe, lossless video trim, 1-click WhatsApp Web export, "
+        "live color scaling, and Geeky Media Inspector.</p>"
+        "<p><b>Tags:</b> <code>image-viewer</code> · <code>video-player</code> · <code>photo-editor</code> · "
+        "<code>video-editor</code> · <code>pyside6</code> · <code>ffmpeg</code> · <code>irfanview</code></p>"
+        f"<p><b>Website:</b> <a href='https://hakanu.github.io/hakuview/' style='color: {accent};'>hakanu.github.io/hakuview</a><br>"
+        f"<b>GitHub:</b> <a href='https://github.com/hakanu/hakuview' style='color: {accent};'>github.com/hakanu/hakuview</a><br>"
+        f"<b>Author / X:</b> <a href='https://x.com/hakanu_' style='color: {accent};'>x.com/hakanu_</a><br>"
         "<b>License:</b> Released under the <b>MIT License</b>.</p>"
     )
     box.setDetailedText(_LICENSE_TEXT)
