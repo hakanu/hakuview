@@ -146,6 +146,11 @@ Why use **HakuView** instead of traditional viewers (**IrfanView**, **XnView MP*
 | **Lossless Video Trim (`[`/`]` + `T`) & Mute** | ✅ **Yes (Instant stream copy)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ Always re-encodes |
 | **1-Click WhatsApp Web Video Fix (`< 16 MB`)** | ✅ **Yes (`K`)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ Manual export settings |
 | **Geeky Codec / BPP / EXIF Inspector (`I`)** | ✅ **Yes** | ✅ Yes (`I`) | ✅ Yes | ❌ No | ❌ No | ❌ Basic info |
+| **Freehand Pen / Arrow / Shape Drawing** | ❌ *Not yet* | ⚠️ Paint plugin | ⚠️ Basic draw | ✅ **Yes (Full paint)** | ✅ **Yes (Full paint)** | ⚠️ Stickers / Draw |
+| **Image Pixel / % Resize (`Ctrl+R` Resample)** | ❌ *Video only so far* | ✅ **Yes (`Ctrl+R`)** | ✅ **Yes** | ✅ **Yes** | ✅ **Yes** | ✅ Yes |
+| **Batch Convert / Batch Rename (100s of files)** | ❌ *Single-file focus* | ✅ **Yes (`B`)** | ✅ **Yes** | ❌ No | ❌ No | ❌ No |
+| **Folder Thumbnail Grid / Contact Sheet** | ❌ *Fast 1-by-1 viewer* | ✅ **Yes (`T`)** | ✅ **Yes** | ❌ No | ❌ No | ✅ Media bin |
+| **Multi-Track Video Timeline & Keyframes** | ❌ *Quick clip tools* | ❌ No | ❌ No | ❌ No | ❌ No | ✅ **Yes (Full NLE)** |
 
 ---
 
