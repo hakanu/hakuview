@@ -150,6 +150,7 @@ class HakuViewWindow(QMainWindow):
         self.update_checker.finished.connect(self._on_update_check_finished)
         self._update_check_manual = False
         self._update_runner: Optional[UpdateRunner] = None
+        self._last_caption_spec = None
 
         if initial_path is not None:
             self.open_path(Path(initial_path), pick_random=pick_random)
@@ -257,6 +258,7 @@ class HakuViewWindow(QMainWindow):
         self.video_view.resizeCompleted.connect(self._on_video_resized)
         self.video_view.transformCompleted.connect(self._on_video_transformed)
         self.video_view.stripAudioCompleted.connect(self._on_video_audio_stripped)
+        self.video_view.captionCompleted.connect(self._on_video_captioned)
         self.video_view.colorExportCompleted.connect(self._on_color_export_done)
         self.video_view.colorExportFailed.connect(self._on_color_export_failed)
         self.video_view.jobStarted.connect(self._on_bg_job_started)
@@ -286,8 +288,10 @@ class HakuViewWindow(QMainWindow):
         self.btn_next = self._add_tb_button("Next ▶", self.next_item, "Next file in folder", "→")
         self.toolbar.addSeparator()
 
-        # Edit ▾ : rotate / flip (and video audio/resize tools) live in one dropdown to keep the toolbar short.
+        # Edit ▾ : caption, rotate / flip (and video audio/resize tools) live in one dropdown to keep the toolbar short.
         self.edit_menu = QMenu(self)
+        self.act_caption = self.edit_menu.addAction("💬  Add Caption / Text...   (A)", self.open_caption_dialog)
+        self.edit_menu.addSeparator()
         self.edit_menu.addAction("↺  Rotate Left 90°   (L)", self.rotate_left)
         self.edit_menu.addAction("↻  Rotate Right 90°   (R)", self.rotate_right)
         self.edit_menu.addAction("⇆  Flip Horizontal   (H)", self.flip_horizontal)
@@ -295,7 +299,14 @@ class HakuViewWindow(QMainWindow):
         self._edit_video_sep = self.edit_menu.addSeparator()
         self.act_strip_audio = self.edit_menu.addAction("🔇  Strip Audio (Lossless)", self.strip_video_audio)
         self.act_resize_video = self.edit_menu.addAction("📐  Resize && Reframe Video...", self.resize_video_dialog)
-        self.btn_edit = self._add_tb_dropdown("Edit", "Rotate and flip image or video", self.edit_menu, "editMenuButton")
+        self.btn_edit = self._add_tb_dropdown("Edit", "Add caption, rotate and flip image or video", self.edit_menu, "editMenuButton")
+        self.btn_caption = self._add_tb_button(
+            "💬 Text",
+            self.open_caption_dialog,
+            "Add caption text with background, font & size to image or video",
+            "A",
+        )
+        self.btn_caption.setEnabled(False)
         self.btn_crop = self._add_tb_button(
             "✂ Crop",
             self.trigger_crop_action,
@@ -584,11 +595,12 @@ class HakuViewWindow(QMainWindow):
             (("C",), self.trigger_crop_action, "C", "Border Crop (drag borders, then C or Enter)"),
             (("Ctrl+Y",), self.apply_crop, "Ctrl+Y", "Apply crop selection"),
             (("B",), self.toggle_color_bar, "B", "Brightness / Contrast panel"),
+            (("A", "Shift+T"), self.open_caption_dialog, "A / Shift+T", "Add caption text with background, font & size"),
             (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress (or WhatsApp Web video export)"),
             (("W", "F5"), self.toggle_slideshow, "W / F5", "Toggle Slideshow"),
             (("[",), self._on_key_bracket_left, "[ / ]", "Video: mark In / Out — Images: slideshow faster / slower"),
             (("]",), self._on_key_bracket_right, None, None),
-            (("T",), self._on_key_t, "T", "Export trimmed video clip (FFmpeg)"),
+            (("T",), self._on_key_t, "T", "Video: export trimmed clip — Image: add caption text"),
             (("M",), self._on_key_m, "M", "Mute / unmute video"),
             (("F", "F11"), self.toggle_fullscreen, "F / F11 / Double-Click", "Toggle Fullscreen"),
             (("+", "="), self._on_key_plus, "+ / - or Wheel", "Zoom image — video: playback speed up / down"),
@@ -662,6 +674,8 @@ class HakuViewWindow(QMainWindow):
     def _on_key_t(self) -> None:
         if self.current_is_video:
             self.video_view.execute_trim()
+        else:
+            self.open_caption_dialog()
 
     def _on_key_m(self) -> None:
         if self.current_is_video:
@@ -935,6 +949,84 @@ class HakuViewWindow(QMainWindow):
         if not self.current_is_video:
             return None
         return self.video_view.strip_audio()
+
+    def open_caption_dialog(self) -> Optional[Path]:
+        """Open the interactive Caption / Text Overlay dialog for the current image or video."""
+        from .caption_dialog import CaptionDialog, apply_caption_to_image
+
+        cur = self.navigator.current_file
+        if cur is None:
+            self.status.showMessage("Open an image or video first.", 2500)
+            return None
+
+        if self.current_is_video:
+            frame = self.video_view.grab_current_frame()
+            if frame is not None and not frame.isNull() and not self.color_bar.is_neutral:
+                frame = adjust_qimage_color(frame, self.color_bar.brightness, self.color_bar.contrast)
+            trim_label = None
+            bounds = self.video_view.trim_range_bounds_ms()
+            if bounds is not None:
+                trim_label = f"{_format_ms(bounds[0])} – {_format_ms(bounds[1])}"
+            dlg = CaptionDialog(
+                frame=frame,
+                is_video=True,
+                trim_range_label=trim_label,
+                initial_spec=self._last_caption_spec,
+                parent=self,
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            spec = dlg.spec()
+            if not spec.text.strip():
+                self.status.showMessage("Caption was empty — nothing exported.", 3000)
+                return None
+            self._last_caption_spec = spec
+            fb_size = (frame.width(), frame.height()) if (frame is not None and not frame.isNull()) else (1280, 720)
+            target = self.video_view.export_captioned_video(spec, fallback_size=fb_size)
+            if target is not None:
+                self.status.showMessage(f"⏳ Exporting captioned video ({target.name}) in the background...", 5000)
+            return target
+
+        if self.document is None:
+            return None
+        preview_img = (
+            adjust_qimage_color(self.document.current, self.color_bar.brightness, self.color_bar.contrast)
+            if not self.color_bar.is_neutral
+            else self.document.current
+        )
+        dlg = CaptionDialog(
+            frame=preview_img,
+            is_video=False,
+            initial_spec=self._last_caption_spec,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        spec = dlg.spec()
+        if not spec.text.strip():
+            self.status.showMessage("Caption was empty — no changes applied.", 3000)
+            return None
+        self._last_caption_spec = spec
+
+        if dlg.save_as_copy:
+            captioned = apply_caption_to_image(preview_img, spec)
+            ext = cur.suffix if cur.suffix else ".png"
+            target = _next_variant_path(cur, "caption", ext)
+            try:
+                self._ignore_watch_until = time.monotonic() + 1.5
+                save_qimage_atomic(captioned, target)
+                self._add_new_file_to_folder(target, "💬 Captioned image saved")
+                return target
+            except Exception as exc:
+                QMessageBox.critical(self, "Save Error", f"Failed to save captioned image:\n{exc}")
+                return None
+
+        if self.document.apply_caption(spec):
+            self._show_document(reset_view=False)
+            self._update_ui_state()
+            self.status.showMessage("💬 Caption applied to image (Ctrl+Z to undo, Ctrl+S to save).", 4500)
+            return cur
+        return None
 
     def trigger_crop_action(self) -> bool:
         """Toggle border crop handles with C (for image), or export trim (for video)."""
@@ -1440,6 +1532,9 @@ class HakuViewWindow(QMainWindow):
     def _on_video_audio_stripped(self, new_path: Path) -> None:
         self._add_new_file_to_folder(new_path, "🔇 Audio-stripped video saved")
 
+    def _on_video_captioned(self, new_path: Path) -> None:
+        self._add_new_file_to_folder(new_path, "💬 Captioned video saved")
+
     def export_adjusted_video(self) -> Optional[Path]:
         """Write a copy of the current video with the brightness/contrast baked in (background ffmpeg)."""
         if not self.current_is_video:
@@ -1578,6 +1673,7 @@ class HakuViewWindow(QMainWindow):
         self.btn_color.setEnabled(has_file)
 
         self.btn_edit.setEnabled(is_img or is_vid)
+        self.btn_caption.setEnabled(is_img or is_vid)
         self._edit_video_sep.setVisible(bool(is_vid))
         self.act_strip_audio.setVisible(bool(is_vid))
         self.act_resize_video.setVisible(bool(is_vid))
@@ -1706,6 +1802,7 @@ class HakuViewWindow(QMainWindow):
         menu.addSeparator()
 
         add("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action, is_img or is_vid)
+        add("💬 Add Caption / Text... (A)", self.open_caption_dialog, is_img or is_vid)
         add("🎨 Brightness && Contrast (B)", self.toggle_color_bar, has_file)
         image_menu = menu.addMenu("🖼 Image")
         image_menu.setEnabled(is_img)

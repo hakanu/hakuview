@@ -1995,3 +1995,161 @@ def test_video_rotate_flip_and_strip_audio(tmp_path: Path, qtbot, monkeypatch) -
     )
     assert a_probe.get("streams", []) == []
 
+
+def test_image_caption_dialog_styles_undo_and_save_copy(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+    from hakuview.caption_dialog import (
+        CaptionDialog,
+        CaptionSpec,
+        apply_caption_to_image,
+        render_caption_overlay,
+    )
+
+    base = QImage(320, 240, QImage.Format.Format_RGB32)
+    base.fill(QColor(20, 30, 45))
+
+    # 1. All background styles and positions render non-empty overlays
+    for bg_style in ("pill", "banner", "outline", "none"):
+        for pos in ("bottom", "center", "top", "bottom_left", "bottom_right"):
+            spec = CaptionSpec(
+                text="Hello HakuView!\nSecond line",
+                font_family="Serif",
+                font_size=48,
+                bold=True,
+                italic=False,
+                text_color="#fde047",
+                bg_style=bg_style,
+                bg_color="#000000",
+                bg_opacity=200,
+                position=pos,
+                margin_pct=10,
+            )
+            ovl = render_caption_overlay(320, 240, spec)
+            assert not ovl.isNull() and (ovl.width(), ovl.height()) == (320, 240)
+            out = apply_caption_to_image(base, spec)
+            assert out != base
+
+    # 2. Dialog presets, font/size controls, and live preview
+    dlg = CaptionDialog(frame=base, is_video=False)
+    qtbot.addWidget(dlg)
+    dlg.text_edit.setPlainText("Summer 2026")
+    dlg.slider_size.setValue(54)
+    assert dlg.spin_size.value() == 54
+    dlg.combo_preset.setCurrentIndex(2)  # Viral Highlight (Yellow Pill)
+    spec_from_dlg = dlg.spec()
+    assert spec_from_dlg.text == "Summer 2026"
+    assert spec_from_dlg.font_size == 54
+    assert spec_from_dlg.bg_color.lower() == "#facc15"
+    assert dlg.lbl_preview.pixmap() is not None and not dlg.lbl_preview.pixmap().isNull()
+
+    # 3. Window integration: Apply to Image (with Undo) + Save as New Image copy
+    img_path = tmp_path / "photo.png"
+    base.save(str(img_path))
+    win = HakuViewWindow(initial_path=img_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+
+    def accept_apply(self):
+        self.text_edit.setPlainText("Apply In Memory")
+        self.slider_size.setValue(46)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CaptionDialog, "exec", accept_apply)
+    win.btn_caption.click()
+    assert win.document.modified
+    assert "caption" in win.document.ops
+    assert win.document.current != base
+
+    # Undo restores exact original image
+    win.undo_edit()
+    assert not win.document.modified
+    assert win.document.current == base
+
+    # Save as New Image writes <name>_caption.png and adds it to folder navigation
+    def accept_copy(self):
+        self.text_edit.setPlainText("Saved Copy Caption")
+        self.save_as_copy = True
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CaptionDialog, "exec", accept_copy)
+    saved_copy = win.open_caption_dialog()
+    assert saved_copy == tmp_path / "photo_caption.png"
+    assert saved_copy.exists()
+    assert saved_copy in win.navigator.files
+    assert not win.document.modified  # original document untouched
+
+
+def test_video_caption_dialog_and_ffmpeg_overlay_worker(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import shutil
+    import subprocess
+    from PySide6.QtWidgets import QDialog
+    from hakuview.caption_dialog import CaptionDialog, CaptionSpec
+    from hakuview.video_view import _CaptionVideoWorker
+
+    win = _video_window(tmp_path, qtbot)
+    assert win.btn_caption.isEnabled()
+    win.video_view.player.duration = lambda: 8000
+    win.video_view.set_trim_in(1000)
+    win.video_view.set_trim_out(5000)
+
+    started = []
+    monkeypatch.setattr(win.video_view, "_start_job", lambda job, ok, err: started.append(job) or True)
+
+    def accept_video_caption(self):
+        assert self._is_video
+        assert not self.chk_trim_range.isHidden() and self.chk_trim_range.isChecked()
+        self.text_edit.setPlainText("Watch till the end!")
+        self.slider_size.setValue(48)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CaptionDialog, "exec", accept_video_caption)
+    target = win.open_caption_dialog()
+    assert target == tmp_path / "clip_caption.mp4"
+    assert len(started) == 1 and isinstance(started[-1], _CaptionVideoWorker)
+    assert started[-1].trim_range_ms == (1000, 5000)
+
+    target.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    win.video_view.captionCompleted.emit(target)
+    assert target in win.navigator.files
+    assert "Captioned video saved" in win.status.currentMessage()
+
+    # End-to-end FFmpeg verification: burn caption overlay onto a video clip
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    src = tmp_path / "dark_clip.mp4"
+    dest = tmp_path / "dark_clip_caption.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x101820:size=240x160:rate=15:duration=1",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+    )
+    spec = CaptionSpec(
+        text="HakuView Video Caption",
+        font_family="Sans Serif",
+        font_size=52,
+        bold=True,
+        text_color="#111827",
+        bg_style="pill",
+        bg_color="#facc15",
+        bg_opacity=245,
+        position="center",
+    )
+    worker = _CaptionVideoWorker(src, dest, spec, fallback_size=(240, 160))
+    done = []
+    worker.finished.connect(done.append)
+    worker.run()
+    assert done == [dest] and dest.exists()
+    assert not worker._overlay_path.exists()  # temporary overlay PNG cleaned up
+
+

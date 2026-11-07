@@ -45,6 +45,8 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   The ⋯ menu lists the last 8 folders you opened (turn off with "Remember window size, position and recent folders" in Settings).
 - ✂️ **Border Crop (`C`)**  
   Press `C` to reveal border handles on the image edges. Pull any side or corner inward and press `C` or `Enter` to crop. (Or simply left-drag a freehand box).
+- 💬 **Caption / Text Overlay (`💬 Text` or `A` / `Shift+T`)**  
+  Add single- or multi-line captions to both **images** and **videos** with a live preview, quick style presets (Reels Dark Pill, Light Pill, Yellow Highlight, Snapchat Full-Width Banner, Classic Impact Meme Outline, Cinema Subtitle), custom fonts & sizes, custom text/box colors & opacity, and flexible placement. Apply non-destructively to images (`Ctrl+Z` undo) or export captioned videos (`<name>_caption.mp4`, optionally scoped to marked In/Out trim points).
 - 🔄 **Quick Rotate & Flip (`R` / `L` / `H` / `V`)**  
   Rotate 90° clockwise/counter-clockwise or flip horizontally/vertically on both images and videos (`<name>_rot90.mp4`, etc.).
 - 🔇 **1-Click Lossless Audio Strip (`Edit ▾ → Strip Audio`)**  
@@ -78,6 +80,7 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `Ctrl + M` | Jump to a random file (also under `⋮` More Options) |
 | `C` | **Border Crop** (drag borders inward, then press `C` or `Enter` to commit) |
 | `B` | **Color Scaling** (Live brightness & contrast sliders for images and videos) |
+| `A` or `Shift + T` | **Add Caption / Text** (Fonts, sizes, pill/banner/outline backgrounds for images & videos) |
 | `R` / `L` | Rotate 90° Right / Left |
 | `H` / `V` | Flip Horizontal / Vertical |
 | `K` | **1-Click Compress** & save variant |

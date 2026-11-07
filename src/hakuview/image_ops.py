@@ -424,6 +424,15 @@ class ImageDocument:
         self.current = crop_qimage(self.current, bounded)
         return True
 
+    def apply_caption(self, spec) -> bool:
+        from .caption_dialog import apply_caption_to_image
+
+        if not getattr(spec, "text", "").strip():
+            return False
+        self._push_undo("caption")
+        self.current = apply_caption_to_image(self.current, spec)
+        return True
+
     def undo(self) -> bool:
         if not self.undo_stack:
             return False

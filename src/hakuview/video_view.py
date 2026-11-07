@@ -654,6 +654,111 @@ class _StripAudioWorker(_FfmpegJob):
         return [(copy_cmd, 500), (reencode_cmd, 0)]
 
 
+def _probe_video_dimensions(path: Path) -> Optional[tuple[int, int]]:
+    """Return `(width, height)` of the primary video stream using ffprobe, or None."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        res = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2.5,
+            **no_window(),
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            line = res.stdout.strip().splitlines()[0]
+            w_str, h_str = line.split("x", 1)
+            w, h = int(w_str), int(h_str)
+            if w > 0 and h > 0:
+                return w, h
+    except Exception:
+        pass
+    return None
+
+
+class _CaptionVideoWorker(_FfmpegJob):
+    """Burns a QPainter-rendered transparent PNG caption overlay onto a video via FFmpeg."""
+
+    label = "Video caption"
+
+    def __init__(
+        self,
+        src_path: Path,
+        dest_path: Path,
+        spec,
+        *,
+        fallback_size: tuple[int, int] = (1280, 720),
+        trim_range_ms: Optional[tuple[int, int]] = None,
+    ) -> None:
+        super().__init__(src_path, dest_path)
+        self.spec = spec
+        self.fallback_size = fallback_size
+        self.trim_range_ms = trim_range_ms
+        self._overlay_path = dest_path.with_name(f".{dest_path.stem}_caption_ovl.png")
+
+    def run(self) -> None:
+        try:
+            super().run()
+        finally:
+            self._overlay_path.unlink(missing_ok=True)
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        from .caption_dialog import render_caption_overlay
+
+        w, h = _probe_video_dimensions(self.src_path) or self.fallback_size
+        w = max(64, int(w) - (int(w) % 2))
+        h = max(64, int(h) - (int(h) % 2))
+        ovl = render_caption_overlay(w, h, self.spec)
+        ovl.save(str(self._overlay_path), "PNG")
+
+        enable_expr = ""
+        if self.trim_range_ms is not None:
+            in_ms, out_ms = self.trim_range_ms
+            if out_ms > in_ms:
+                enable_expr = f":enable='between(t,{in_ms / 1000.0:.3f},{out_ms / 1000.0:.3f})'"
+
+        fc = f"[0:v]scale={w}:{h}[base];[base][1:v]overlay=0:0{enable_expr},format=yuv420p[v]"
+        encode = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(self.src_path),
+            "-i",
+            str(self._overlay_path),
+            "-filter_complex",
+            fc,
+            "-map",
+            "[v]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-preset",
+            "fast",
+            "-movflags",
+            "+faststart",
+        ]
+        return [
+            (encode + ["-c:a", "copy", str(self.dest_path)], 0),
+            (encode + ["-c:a", "aac", "-b:a", "192k", str(self.dest_path)], 0),
+        ]
+
+
 class VideoResizeDialog(QDialog):
     """Interactive dialog for reframing/resizing a video with CapCut-style blurred dominant color fill."""
 
@@ -1120,6 +1225,7 @@ class VideoPlayerWidget(QWidget):
     resizeCompleted = Signal(Path)
     transformCompleted = Signal(Path, str)
     stripAudioCompleted = Signal(Path)
+    captionCompleted = Signal(Path)
     colorExportCompleted = Signal(Path)
     colorExportFailed = Signal(str)
     jobStarted = Signal(str)
@@ -1645,6 +1751,38 @@ class VideoPlayerWidget(QWidget):
             job,
             self.stripAudioCompleted.emit,
             lambda err: QMessageBox.warning(self, "Strip Audio Error", err),
+        ):
+            return None
+        return dest_path
+
+    def trim_range_bounds_ms(self) -> Optional[tuple[int, int]]:
+        """Return `(start_ms, end_ms)` when at least one trim point is marked on a known-duration video."""
+        if not self.has_trim_points():
+            return None
+        dur = self.player.duration()
+        start_ms = self.trim_in_ms if self.trim_in_ms is not None else 0
+        end_ms = self.trim_out_ms if self.trim_out_ms is not None else (dur if dur > 0 else 0)
+        if end_ms > start_ms:
+            return start_ms, end_ms
+        return None
+
+    def export_captioned_video(self, spec, *, fallback_size: tuple[int, int] = (1280, 720)) -> Optional[Path]:
+        """Burn `spec` (CaptionSpec) onto the current video and save as <name>_caption.mp4."""
+        if self._current_path is None or not getattr(spec, "text", "").strip():
+            return None
+        dest_path = _next_variant_path(self._current_path, "caption", ".mp4")
+        trim_bounds = self.trim_range_bounds_ms() if getattr(spec, "only_trim_range", False) else None
+        job = _CaptionVideoWorker(
+            self._current_path,
+            dest_path,
+            spec,
+            fallback_size=fallback_size,
+            trim_range_ms=trim_bounds,
+        )
+        if not self._start_job(
+            job,
+            self.captionCompleted.emit,
+            lambda err: QMessageBox.warning(self, "Video Caption Error", err),
         ):
             return None
         return dest_path
