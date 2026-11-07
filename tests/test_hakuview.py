@@ -2153,3 +2153,224 @@ def test_video_caption_dialog_and_ffmpeg_overlay_worker(tmp_path: Path, qtbot, m
     assert not worker._overlay_path.exists()  # temporary overlay PNG cleaned up
 
 
+def test_floating_paste_overlay_stamp_chain_stitch_and_undo(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    base = QImage(300, 200, QImage.Format.Format_RGB32)
+    base.fill(QColor(25, 35, 50))
+    base_path = tmp_path / "base.png"
+    base.save(str(base_path))
+
+    win = HakuViewWindow(initial_path=base_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+    _show_active(win, qtbot)
+
+    # 1. Paste a 80x40 red sticker from clipboard -> floating overlay appears
+    sticker1 = QImage(80, 40, QImage.Format.Format_RGB32)
+    sticker1.fill(QColor(220, 40, 40))
+    QApplication.clipboard().setImage(sticker1)
+
+    assert win.paste_image_overlay()
+    assert win.canvas.has_overlay
+    assert win.paste_bar.isVisible()
+    assert (win.canvas.overlay_rect.width(), win.canvas.overlay_rect.height()) == (80, 40)
+
+    # Rotating while floating rotates the overlay, not the base document
+    win.rotate_right()
+    assert not win.document.modified
+    assert (win.canvas.overlay_rect.width(), win.canvas.overlay_rect.height()) == (40, 80)
+
+    # Adjust opacity, rounded corners, and photo border
+    win.paste_bar.slider_opacity.setValue(200)
+    win.paste_bar.slider_rounded.setValue(20)
+    win.paste_bar.chk_border.setChecked(True)
+    assert win.canvas.overlay_opacity == 200
+    assert win.canvas.overlay_rounded_pct == 20
+    assert win.canvas.overlay_border
+
+    # 2. Chained paste: pasting a 2nd image while 1st is floating auto-stamps the 1st!
+    sticker2 = QImage(60, 60, QImage.Format.Format_RGB32)
+    sticker2.fill(QColor(40, 200, 90))
+    QApplication.clipboard().setImage(sticker2)
+    assert win.paste_image_overlay()
+    assert win.document.ops == ["stamp"]
+    assert win.canvas.has_overlay
+    assert (win.canvas.overlay_rect.width(), win.canvas.overlay_rect.height()) == (60, 60)
+
+    # Press Enter to stamp the 2nd overlay
+    QTest.keyClick(win, Qt.Key.Key_Return)
+    assert not win.canvas.has_overlay
+    assert not win.paste_bar.isVisible()
+    assert win.document.ops == ["stamp", "stamp"]
+    assert win.document.current != base
+
+    # Two Ctrl+Z undos peel back both stamped images in reverse order
+    win.undo_edit()
+    assert win.document.ops == ["stamp"]
+    win.undo_edit()
+    assert not win.document.modified
+    assert win.document.current == base
+
+    # 3. Side-by-Side and Stack-Below stitching from the floating paste bar
+    QApplication.clipboard().setImage(sticker2)
+    assert win.paste_image_overlay()
+    win.paste_bar.btn_stitch_h.click()
+    assert not win.canvas.has_overlay
+    assert win.document.ops == ["stitch"]
+    assert (win.document.current.width(), win.document.current.height()) == (500, 200)
+    win.undo_edit()
+
+    QApplication.clipboard().setImage(sticker2)
+    assert win.paste_image_overlay()
+    win.paste_bar.btn_stitch_v.click()
+    assert (win.document.current.width(), win.document.current.height()) == (300, 500)
+    win.undo_edit()
+
+    # 4. Esc cancels floating paste without modifying the document
+    QApplication.clipboard().setImage(sticker1)
+    assert win.paste_image_overlay()
+    win._on_escape()
+    assert not win.canvas.has_overlay
+    assert not win.paste_bar.isVisible()
+    assert not win.document.modified
+
+
+def test_image_erase_region_styles_delete_key_and_dialog(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+    from hakuview.erase_dialog import (
+        EraseRegionDialog,
+        erase_image_region,
+        sample_surrounding_color,
+    )
+
+    # Blue background with a detailed yellow/dark "face" box at (50, 50, 60, 60)
+    base = QImage(200, 160, QImage.Format.Format_RGB32)
+    base.fill(QColor(20, 80, 180))
+    face_rect = QRect(50, 50, 60, 60)
+    for y in range(50, 110):
+        for x in range(50, 110):
+            is_feature = (x + y) % 5 == 0
+            base.setPixelColor(x, y, QColor(30, 20, 20) if is_feature else QColor(250, 220, 40))
+
+    surround = sample_surrounding_color(base, face_rect)
+    assert surround.blue() > surround.red() + 80
+
+    # 1. All 5 erase styles alter the target region while keeping outside pixels intact
+    for style in ("blur", "pixelate", "heal", "surround", "blackout"):
+        out = erase_image_region(base, face_rect, style=style, strength=75)
+        assert out != base
+        assert out.pixelColor(5, 5) == QColor(20, 80, 180)
+        if style == "blackout":
+            assert out.pixelColor(80, 80) == QColor(0, 0, 0)
+        elif style in ("heal", "surround"):
+            # Center of the healed/surrounded region now matches the blue background instead of yellow
+            c = out.pixelColor(80, 80)
+            assert c.blue() > c.red() + 60
+
+    # 2. Fast path: select region on canvas + press Delete -> erases immediately, Ctrl+Z undoes
+    img_path = tmp_path / "portrait.png"
+    base.save(str(img_path))
+    win = HakuViewWindow(initial_path=img_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+
+    win.canvas._selection = QRect(face_rect)
+    assert win.delete_selected_region() == img_path
+    assert win.canvas.selection.isNull()
+    assert win.document.modified and win.document.ops == ["erase"]
+    assert win.document.current != base
+
+    win.undo_edit()
+    assert not win.document.modified
+    assert win.document.current == base
+
+    # 3. Interactive EraseRegionDialog: spinboxes, style picker, and Save as New Image
+    dlg = EraseRegionDialog(frame=base, initial_rect=face_rect, initial_style="heal")
+    qtbot.addWidget(dlg)
+    assert dlg.spec().rect == face_rect
+    assert dlg.spec().style == "heal"
+    dlg.spin_x.setValue(40)
+    assert dlg.preview.region.x() == 40
+
+    def accept_copy(self):
+        self.combo_style.setCurrentIndex(self.combo_style.findData("heal"))
+        self.save_as_copy = True
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(EraseRegionDialog, "exec", accept_copy)
+    saved = win.open_erase_region_dialog()
+    assert saved == tmp_path / "portrait_redacted.png"
+    assert saved.exists() and saved in win.navigator.files
+
+
+def test_video_erase_region_dialog_and_ffmpeg_worker(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import shutil
+    import subprocess
+    from PySide6.QtWidgets import QDialog
+    from hakuview.erase_dialog import EraseRegionDialog, EraseRegionSpec, build_erase_video_vf
+    from hakuview.video_view import _EraseVideoRegionWorker
+
+    rect = QRect(30, 20, 60, 50)
+    for style in ("blur", "pixelate", "heal", "surround", "blackout"):
+        vf = build_erase_video_vf(rect, 320, 240, style=style, strength=70, trim_range_ms=(1000, 4000))
+        assert "between(t,1.000,4.000)" in vf and "yuv420p" in vf
+
+    win = _video_window(tmp_path, qtbot)
+    win.video_view.player.duration = lambda: 6000
+    win.video_view.set_trim_in(1000)
+    win.video_view.set_trim_out(4000)
+
+    started = []
+    monkeypatch.setattr(win.video_view, "_start_job", lambda job, ok, err: started.append(job) or True)
+
+    def accept_video_erase(self):
+        assert self._is_video
+        assert not self.chk_trim_range.isHidden() and self.chk_trim_range.isChecked()
+        self.combo_style.setCurrentIndex(self.combo_style.findData("blur"))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(EraseRegionDialog, "exec", accept_video_erase)
+    target = win.open_erase_region_dialog()
+    assert target == tmp_path / "clip_redacted.mp4"
+    assert len(started) == 1 and isinstance(started[-1], _EraseVideoRegionWorker)
+    assert started[-1].trim_range_ms == (1000, 4000)
+
+    target.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    win.video_view.eraseCompleted.emit(target)
+    assert target in win.navigator.files
+    assert "Redacted video saved" in win.status.currentMessage()
+
+    # End-to-end FFmpeg verification for both "blur" and "heal" (delogo)
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    src = tmp_path / "vid.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=duration=1:size=240x160:rate=15",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+    )
+    for style in ("blur", "heal"):
+        dest = tmp_path / f"vid_{style}.mp4"
+        spec = EraseRegionSpec(rect=QRect(40, 30, 80, 60), style=style, strength=65)
+        worker = _EraseVideoRegionWorker(src, dest, spec, frame_size=(240, 160))
+        done = []
+        worker.finished.connect(done.append)
+        worker.run()
+        assert done == [dest] and dest.exists()
+
+
+
+

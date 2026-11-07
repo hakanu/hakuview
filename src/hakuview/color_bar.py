@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
 
 
 class ColorAdjustBar(QWidget):
@@ -118,3 +118,110 @@ class ColorAdjustBar(QWidget):
         for slider, label in ((self.slider_brightness, self.lbl_b_val), (self.slider_contrast, self.lbl_c_val)):
             value = slider.value()
             label.setText(f"{value:+d}" if value else "0")
+
+
+class PasteOverlayBar(QWidget):
+    """Floating paste control bar: Opacity, Corner Radius, Frame/Shadow, Stitch, Stamp & Cancel."""
+
+    styleChanged = Signal(int, int, bool)  # opacity (0..255), rounded_pct (0..50), border (bool)
+    stitchRequested = Signal(str)  # "horizontal" | "vertical"
+    stampRequested = Signal()
+    cancelRequested = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("colorBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(8)
+
+        title = QLabel("📌 Floating Paste:", self)
+        title.setObjectName("colorTitle")
+        layout.addWidget(title)
+
+        layout.addWidget(QLabel("Opacity:", self))
+        self.slider_opacity = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider_opacity.setRange(25, 255)
+        self.slider_opacity.setValue(255)
+        self.slider_opacity.setFixedWidth(85)
+        self.slider_opacity.setToolTip("Adjust overlay opacity (10% to 100%)")
+        self.slider_opacity.valueChanged.connect(self._on_changed)
+        layout.addWidget(self.slider_opacity)
+        self.lbl_opacity = QLabel("100%", self)
+        self.lbl_opacity.setObjectName("colorValue")
+        self.lbl_opacity.setFixedWidth(36)
+        layout.addWidget(self.lbl_opacity)
+
+        layout.addWidget(QLabel("Corners:", self))
+        self.slider_rounded = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider_rounded.setRange(0, 50)
+        self.slider_rounded.setValue(0)
+        self.slider_rounded.setFixedWidth(72)
+        self.slider_rounded.setToolTip("Round the corners of the floating image (0% to 50%)")
+        self.slider_rounded.valueChanged.connect(self._on_changed)
+        layout.addWidget(self.slider_rounded)
+        self.lbl_rounded = QLabel("0%", self)
+        self.lbl_rounded.setObjectName("colorValue")
+        self.lbl_rounded.setFixedWidth(30)
+        layout.addWidget(self.lbl_rounded)
+
+        self.chk_border = QCheckBox("Frame && Shadow", self)
+        self.chk_border.setToolTip("Draw a white photo border and drop shadow around the pasted image")
+        self.chk_border.toggled.connect(self._on_changed)
+        layout.addWidget(self.chk_border)
+
+        self.btn_stitch_h = QPushButton("◫ Side-by-Side", self)
+        self.btn_stitch_h.setToolTip("Stitch pasted image to the right of the current image")
+        self.btn_stitch_h.clicked.connect(lambda: self.stitchRequested.emit("horizontal"))
+        layout.addWidget(self.btn_stitch_h)
+
+        self.btn_stitch_v = QPushButton("⊟ Stack Below", self)
+        self.btn_stitch_v.setToolTip("Stack pasted image directly below the current image")
+        self.btn_stitch_v.clicked.connect(lambda: self.stitchRequested.emit("vertical"))
+        layout.addWidget(self.btn_stitch_v)
+
+        self.btn_stamp = QPushButton("✓ Stamp (Enter)", self)
+        self.btn_stamp.setObjectName("btnSaveAdj")
+        self.btn_stamp.setToolTip("Bake floating overlay onto the image (Enter) — undoable with Ctrl+Z")
+        self.btn_stamp.clicked.connect(self.stampRequested.emit)
+        layout.addWidget(self.btn_stamp)
+
+        layout.addStretch(1)
+
+        self.btn_cancel = QPushButton("✕", self)
+        self.btn_cancel.setToolTip("Cancel floating paste (Esc)")
+        self.btn_cancel.clicked.connect(self.cancelRequested.emit)
+        layout.addWidget(self.btn_cancel)
+
+        self.hide()
+
+    @property
+    def opacity(self) -> int:
+        return self.slider_opacity.value()
+
+    @property
+    def rounded_pct(self) -> int:
+        return self.slider_rounded.value()
+
+    @property
+    def border(self) -> bool:
+        return self.chk_border.isChecked()
+
+    def reset(self) -> None:
+        for w, val in ((self.slider_opacity, 255), (self.slider_rounded, 0)):
+            w.blockSignals(True)
+            w.setValue(val)
+            w.blockSignals(False)
+        self.chk_border.blockSignals(True)
+        self.chk_border.setChecked(False)
+        self.chk_border.blockSignals(False)
+        self._update_labels()
+
+    def _on_changed(self) -> None:
+        self._update_labels()
+        self.styleChanged.emit(self.opacity, self.rounded_pct, self.border)
+
+    def _update_labels(self) -> None:
+        self.lbl_opacity.setText(f"{round(self.opacity * 100 / 255)}%")
+        self.lbl_rounded.setText(f"{self.rounded_pct}%")

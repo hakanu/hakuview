@@ -13,8 +13,8 @@ import threading
 from typing import List, Optional, Tuple
 
 from PIL import Image, ImageOps, JpegImagePlugin
-from PySide6.QtCore import QObject, QRect, QRunnable, QThreadPool, Qt, Signal
-from PySide6.QtGui import QImage, QImageReader, QImageWriter, QTransform
+from PySide6.QtCore import QObject, QRect, QRectF, QRunnable, QSize, QThreadPool, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QTransform
 
 from .formatting import human_size
 from .proc import no_window
@@ -118,6 +118,122 @@ def crop_qimage(image: QImage, rect: QRect) -> QImage:
     if bounded.isEmpty() or bounded.width() < 2 or bounded.height() < 2:
         return image
     return image.copy(bounded)
+
+
+def paint_overlay_on_painter(
+    painter: QPainter,
+    overlay: QImage,
+    target_rect: QRectF,
+    *,
+    opacity: int = 255,
+    rounded_pct: int = 0,
+    border: bool = False,
+) -> None:
+    """Paint `overlay` inside `target_rect` with optional opacity, rounded corners, and photo frame + shadow."""
+    if overlay is None or overlay.isNull() or target_rect.isEmpty():
+        return
+    alpha = max(0, min(255, int(opacity))) / 255.0
+    if alpha <= 0.0:
+        return
+
+    min_side = min(target_rect.width(), target_rect.height())
+    radius = min_side * (max(0, min(50, int(rounded_pct))) / 100.0)
+
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+    if border:
+        shadow_off = max(2.0, min_side * 0.022)
+        shadow_rect = target_rect.translated(shadow_off, shadow_off)
+        painter.setOpacity(alpha * 0.55)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 180))
+        if radius > 0.5:
+            painter.drawRoundedRect(shadow_rect, radius, radius)
+        else:
+            painter.drawRect(shadow_rect)
+
+    painter.setOpacity(alpha)
+    if radius > 0.5:
+        clip = QPainterPath()
+        clip.addRoundedRect(target_rect, radius, radius)
+        painter.save()
+        painter.setClipPath(clip)
+        painter.drawImage(target_rect, overlay, QRectF(overlay.rect()))
+        painter.restore()
+    else:
+        painter.drawImage(target_rect, overlay, QRectF(overlay.rect()))
+
+    if border:
+        pen_w = max(1.5, min_side * 0.012)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 235), pen_w))
+        if radius > 0.5:
+            painter.drawRoundedRect(target_rect, radius, radius)
+        else:
+            painter.drawRect(target_rect)
+
+    painter.restore()
+
+
+def composite_overlay_image(
+    base: QImage,
+    overlay: QImage,
+    rect: QRect,
+    *,
+    opacity: int = 255,
+    rounded_pct: int = 0,
+    border: bool = False,
+) -> QImage:
+    """Return a copy of `base` with `overlay` stamped onto `rect`."""
+    if base is None or base.isNull() or overlay is None or overlay.isNull() or rect.isEmpty():
+        return base
+    out = base.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    painter = QPainter(out)
+    paint_overlay_on_painter(
+        painter,
+        overlay,
+        QRectF(rect),
+        opacity=opacity,
+        rounded_pct=rounded_pct,
+        border=border,
+    )
+    painter.end()
+    if base.format() in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32):
+        return out.convertToFormat(base.format())
+    return out
+
+
+def stitch_images(base: QImage, other: QImage, direction: str = "horizontal") -> QImage:
+    """Stitch `other` next to (`horizontal`) or below (`vertical`) `base`, matching edge length."""
+    if base is None or base.isNull() or other is None or other.isNull():
+        return base
+    bw, bh = base.width(), base.height()
+    ow, oh = max(1, other.width()), max(1, other.height())
+    if direction == "vertical":
+        new_ow = bw
+        new_oh = max(1, round(oh * (bw / ow)))
+        scaled = other.scaled(QSize(new_ow, new_oh), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        canvas = QImage(bw, bh + new_oh, QImage.Format.Format_ARGB32_Premultiplied)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.drawImage(0, 0, base)
+        painter.drawImage(0, bh, scaled)
+        painter.end()
+    else:
+        new_oh = bh
+        new_ow = max(1, round(ow * (bh / oh)))
+        scaled = other.scaled(QSize(new_ow, new_oh), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        canvas = QImage(bw + new_ow, bh, QImage.Format.Format_ARGB32_Premultiplied)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.drawImage(0, 0, base)
+        painter.drawImage(bw, 0, scaled)
+        painter.end()
+    if base.format() in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32):
+        return canvas.convertToFormat(base.format())
+    return canvas
 
 
 def save_qimage_atomic(image: QImage, target_path: Path | str, quality: int = 95) -> None:
@@ -431,6 +547,45 @@ class ImageDocument:
             return False
         self._push_undo("caption")
         self.current = apply_caption_to_image(self.current, spec)
+        return True
+
+    def stamp_overlay(
+        self,
+        overlay: QImage,
+        rect: QRect,
+        *,
+        opacity: int = 255,
+        rounded_pct: int = 0,
+        border: bool = False,
+    ) -> bool:
+        if overlay is None or overlay.isNull() or rect.isEmpty() or rect.width() < 2 or rect.height() < 2:
+            return False
+        self._push_undo("stamp")
+        self.current = composite_overlay_image(
+            self.current,
+            overlay,
+            rect,
+            opacity=opacity,
+            rounded_pct=rounded_pct,
+            border=border,
+        )
+        return True
+
+    def stitch_with(self, other: QImage, direction: str = "horizontal") -> bool:
+        if other is None or other.isNull():
+            return False
+        self._push_undo("stitch")
+        self.current = stitch_images(self.current, other, direction=direction)
+        return True
+
+    def erase_region(self, rect: QRect, style: str = "blur", strength: int = 60) -> bool:
+        from .erase_dialog import erase_image_region
+
+        bounded = rect.intersected(self.current.rect())
+        if bounded.isEmpty() or bounded.width() < 2 or bounded.height() < 2:
+            return False
+        self._push_undo("erase")
+        self.current = erase_image_region(self.current, bounded, style=style, strength=strength)
         return True
 
     def undo(self) -> bool:

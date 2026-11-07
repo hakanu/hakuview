@@ -759,6 +759,73 @@ class _CaptionVideoWorker(_FfmpegJob):
         ]
 
 
+class _EraseVideoRegionWorker(_FfmpegJob):
+    """Erases / blurs / pixelates / heals a rectangular region on a video via FFmpeg."""
+
+    label = "Video region erase"
+
+    def __init__(
+        self,
+        src_path: Path,
+        dest_path: Path,
+        spec,
+        *,
+        frame_size: tuple[int, int] = (1280, 720),
+        surround_hex: str = "#000000",
+        trim_range_ms: Optional[tuple[int, int]] = None,
+    ) -> None:
+        super().__init__(src_path, dest_path)
+        self.spec = spec
+        self.frame_size = frame_size
+        self.surround_hex = surround_hex
+        self.trim_range_ms = trim_range_ms
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        from .erase_dialog import build_erase_video_vf
+
+        vw, vh = _probe_video_dimensions(self.src_path) or self.frame_size
+        fw, fh = max(1, self.frame_size[0]), max(1, self.frame_size[1])
+        r = self.spec.rect
+        if (fw, fh) != (vw, vh):
+            sx, sy = vw / fw, vh / fh
+            r = QRect(
+                round(r.x() * sx),
+                round(r.y() * sy),
+                max(4, round(r.width() * sx)),
+                max(4, round(r.height() * sy)),
+            )
+
+        vf = build_erase_video_vf(
+            r,
+            vw,
+            vh,
+            style=self.spec.style,
+            strength=self.spec.strength,
+            surround_hex=self.surround_hex,
+            trim_range_ms=self.trim_range_ms,
+        )
+        encode = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(self.src_path),
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-preset",
+            "fast",
+            "-movflags",
+            "+faststart",
+        ]
+        return [
+            (encode + ["-c:a", "copy", str(self.dest_path)], 0),
+            (encode + ["-c:a", "aac", "-b:a", "192k", str(self.dest_path)], 0),
+        ]
+
+
 class VideoResizeDialog(QDialog):
     """Interactive dialog for reframing/resizing a video with CapCut-style blurred dominant color fill."""
 
@@ -1226,6 +1293,7 @@ class VideoPlayerWidget(QWidget):
     transformCompleted = Signal(Path, str)
     stripAudioCompleted = Signal(Path)
     captionCompleted = Signal(Path)
+    eraseCompleted = Signal(Path)
     colorExportCompleted = Signal(Path)
     colorExportFailed = Signal(str)
     jobStarted = Signal(str)
@@ -1783,6 +1851,34 @@ class VideoPlayerWidget(QWidget):
             job,
             self.captionCompleted.emit,
             lambda err: QMessageBox.warning(self, "Video Caption Error", err),
+        ):
+            return None
+        return dest_path
+
+    def export_erased_video(
+        self,
+        spec,
+        *,
+        frame_size: tuple[int, int] = (1280, 720),
+        surround_hex: str = "#000000",
+    ) -> Optional[Path]:
+        """Erase/redact `spec.rect` across the current video and save as <name>_redacted.mp4."""
+        if self._current_path is None or getattr(spec, "rect", QRect()).isEmpty():
+            return None
+        dest_path = _next_variant_path(self._current_path, "redacted", ".mp4")
+        trim_bounds = self.trim_range_bounds_ms() if getattr(spec, "only_trim_range", False) else None
+        job = _EraseVideoRegionWorker(
+            self._current_path,
+            dest_path,
+            spec,
+            frame_size=frame_size,
+            surround_hex=surround_hex,
+            trim_range_ms=trim_bounds,
+        )
+        if not self._start_job(
+            job,
+            self.eraseCompleted.emit,
+            lambda err: QMessageBox.warning(self, "Video Erase Error", err),
         ):
             return None
         return dest_path

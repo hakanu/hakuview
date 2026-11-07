@@ -45,8 +45,12 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   The ⋯ menu lists the last 8 folders you opened (turn off with "Remember window size, position and recent folders" in Settings).
 - ✂️ **Border Crop (`C`)**  
   Press `C` to reveal border handles on the image edges. Pull any side or corner inward and press `C` or `Enter` to crop. (Or simply left-drag a freehand box).
+- 🧹 **Delete / Erase / Blur Region (`Del` or `X`)**  
+  Drag a box over any unwanted face, license plate, watermark, or object and press `Delete` (or press `X` to open the interactive **Erase / Redact Region** dialog for both **images** and **videos**). Choose between **🌫️ Heavy Blur**, **🟦 Pixelate / Mosaic**, **🪄 Smart Heal / Delogo** (interpolates surrounding pixels), **🎨 Surrounding Color Fill**, or **⬛ Blackout** — with optional In/Out timestamp scoping on videos.
 - 💬 **Caption / Text Overlay (`💬 Text` or `A` / `Shift+T`)**  
   Add single- or multi-line captions to both **images** and **videos** with a live preview, quick style presets (Reels Dark Pill, Light Pill, Yellow Highlight, Snapchat Full-Width Banner, Classic Impact Meme Outline, Cinema Subtitle), custom fonts & sizes, custom text/box colors & opacity, and flexible placement. Apply non-destructively to images (`Ctrl+Z` undo) or export captioned videos (`<name>_caption.mp4`, optionally scoped to marked In/Out trim points).
+- 📌 **Floating Paste & Stamp / Image Mashup (`Ctrl+V` / `Ctrl+Shift+V`)**  
+  Copy any image (`Ctrl+C`), cycle to another photo (`→`), and press `Ctrl+V` (or pick a file with `Ctrl+Shift+V` / `Shift+Drop`) to float it on top. Drag to move, drag the 8 handles to resize, rotate/flip the floating piece with `R`/`L`/`H`/`V`, tweak **Opacity**, **Rounded Corners**, or **Frame & Shadow**, or click **◫ Side-by-Side** / **⊟ Stack Below** to stitch images together. Press `Enter` (or `Ctrl+V` again to chain another image!) to stamp it into the `Ctrl+Z` undo stack.
 - 🔄 **Quick Rotate & Flip (`R` / `L` / `H` / `V`)**  
   Rotate 90° clockwise/counter-clockwise or flip horizontally/vertically on both images and videos (`<name>_rot90.mp4`, etc.).
 - 🔇 **1-Click Lossless Audio Strip (`Edit ▾ → Strip Audio`)**  
@@ -79,6 +83,7 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `←` / `→` | Previous / Next file in folder |
 | `Ctrl + M` | Jump to a random file (also under `⋮` More Options) |
 | `C` | **Border Crop** (drag borders inward, then press `C` or `Enter` to commit) |
+| `Del` / `Backspace` or `X` | **Delete / Erase / Blur Region** (Blur, Pixelate, Smart Heal/Delogo, or Blackout a face/object on images & videos) |
 | `B` | **Color Scaling** (Live brightness & contrast sliders for images and videos) |
 | `A` or `Shift + T` | **Add Caption / Text** (Fonts, sizes, pill/banner/outline backgrounds for images & videos) |
 | `R` / `L` | Rotate 90° Right / Left |
@@ -94,6 +99,7 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `+` / `-` or `Wheel` | Zoom (centered at mouse); on video: playback speed. The wheel can step through files instead (Settings) |
 | `,` / `.` | Video: step one frame back / forward |
 | `Ctrl + C` / `Ctrl + Shift + C` | Copy image (or video frame) / copy file path |
+| `Ctrl + V` / `Ctrl + Shift + V` | **Floating Paste Overlay** from clipboard / from file (`Enter` to Stamp, `Esc` to cancel) |
 | `F2` | Rename the current file |
 | `Ctrl + G` | Go to file by number or name |
 | `S` | Video: save the current frame as PNG next to the video (with brightness/contrast) |

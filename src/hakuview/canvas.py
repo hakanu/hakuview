@@ -22,6 +22,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from .image_ops import flip_qimage, paint_overlay_on_painter, rotate_qimage
 from .theme import PALETTE
 
 
@@ -30,6 +31,7 @@ class ImageCanvas(QWidget):
 
     zoomChanged = Signal(float)
     selectionChanged = Signal(QRect)  # Emitted in image pixel coordinates
+    overlayChanged = Signal(bool)  # True when a floating paste overlay is active
     doubleClicked = Signal()
     wheelNavigate = Signal(int)  # +1 = next file, -1 = previous (when the wheel is set to navigate)
 
@@ -49,6 +51,13 @@ class ImageCanvas(QWidget):
 
         # Selection rectangle in image pixel coordinates
         self._selection: QRect = QRect()
+        # Floating paste overlay in image pixel coordinates
+        self._overlay_image: Optional[QImage] = None
+        self._overlay_rect: QRect = QRect()
+        self._overlay_opacity: int = 255
+        self._overlay_rounded_pct: int = 0
+        self._overlay_border: bool = False
+
         self._drag_mode: Optional[str] = None  # 'new', 'move', 'n','s','e','w','ne','nw','se','sw', 'pan'
         self._drag_start_widget: QPointF = QPointF()
         self._drag_start_image: QPoint = QPoint()
@@ -80,6 +89,8 @@ class ImageCanvas(QWidget):
         self._image = image
         self._pixmap = QPixmap.fromImage(image) if (image is not None and not image.isNull()) else None
         self.clear_selection()
+        if reset_view:
+            self.clear_overlay()
 
         if movie_path is not None and movie_path.suffix.lower() in (".gif", ".webp"):
             movie = QMovie(str(movie_path))
@@ -142,6 +153,114 @@ class ImageCanvas(QWidget):
         if self._image is not None and not self._image.isNull():
             self._selection = self._image.rect()
             self.selectionChanged.emit(self._selection)
+            self.update()
+
+    # ------------------------------------------------------------------
+    # Floating Paste Overlay
+    # ------------------------------------------------------------------
+
+    @property
+    def has_overlay(self) -> bool:
+        return (
+            self._overlay_image is not None
+            and not self._overlay_image.isNull()
+            and not self._overlay_rect.isEmpty()
+        )
+
+    @property
+    def overlay_image(self) -> Optional[QImage]:
+        return self._overlay_image
+
+    @property
+    def overlay_rect(self) -> QRect:
+        return self._overlay_rect
+
+    @property
+    def overlay_opacity(self) -> int:
+        return self._overlay_opacity
+
+    @property
+    def overlay_rounded_pct(self) -> int:
+        return self._overlay_rounded_pct
+
+    @property
+    def overlay_border(self) -> bool:
+        return self._overlay_border
+
+    def start_overlay(self, image: QImage, rect: Optional[QRect] = None) -> bool:
+        """Place `image` as a movable/resizable floating layer over the current canvas image."""
+        if self._image is None or self._image.isNull() or image is None or image.isNull():
+            return False
+        self.clear_selection()
+        self._overlay_image = image.copy()
+
+        bw, bh = self._image.width(), self._image.height()
+        ow, oh = max(1, image.width()), max(1, image.height())
+        if rect is not None and not rect.isEmpty():
+            self._overlay_rect = rect.intersected(self._image.rect())
+        else:
+            # Default: fit within 55% of the base image while preserving aspect ratio (or 1:1 if smaller)
+            max_w = max(16.0, bw * 0.55)
+            max_h = max(16.0, bh * 0.55)
+            scale = min(1.0, max_w / ow, max_h / oh)
+            if scale < 0.15:
+                scale = min(max_w / ow, max_h / oh)
+            tw = max(8, min(bw, round(ow * scale)))
+            th = max(8, min(bh, round(oh * scale)))
+            tx = max(0, (bw - tw) // 2)
+            ty = max(0, (bh - th) // 2)
+            self._overlay_rect = QRect(tx, ty, tw, th)
+
+        self.overlayChanged.emit(True)
+        self.update()
+        return True
+
+    def set_overlay_style(
+        self,
+        *,
+        opacity: Optional[int] = None,
+        rounded_pct: Optional[int] = None,
+        border: Optional[bool] = None,
+    ) -> None:
+        if opacity is not None:
+            self._overlay_opacity = max(10, min(255, int(opacity)))
+        if rounded_pct is not None:
+            self._overlay_rounded_pct = max(0, min(50, int(rounded_pct)))
+        if border is not None:
+            self._overlay_border = bool(border)
+        self.update()
+
+    def transform_overlay(self, op: str) -> bool:
+        """Rotate or flip the floating overlay image in place."""
+        if not self.has_overlay or self._overlay_image is None or self._image is None:
+            return False
+        if op == "rotate_left":
+            self._overlay_image = rotate_qimage(self._overlay_image, -90)
+        elif op == "rotate_right":
+            self._overlay_image = rotate_qimage(self._overlay_image, 90)
+        elif op == "flip_h":
+            self._overlay_image = flip_qimage(self._overlay_image, horizontal=True)
+        elif op == "flip_v":
+            self._overlay_image = flip_qimage(self._overlay_image, vertical=True)
+        else:
+            return False
+
+        if op in ("rotate_left", "rotate_right"):
+            c = self._overlay_rect.center()
+            nw = min(self._image.width(), self._overlay_rect.height())
+            nh = min(self._image.height(), self._overlay_rect.width())
+            nx = max(0, min(self._image.width() - nw, c.x() - nw // 2))
+            ny = max(0, min(self._image.height() - nh, c.y() - nh // 2))
+            self._overlay_rect = QRect(nx, ny, nw, nh)
+        self.update()
+        return True
+
+    def clear_overlay(self) -> None:
+        was_active = self.has_overlay
+        self._overlay_image = None
+        self._overlay_rect = QRect()
+        if was_active:
+            self.overlayChanged.emit(False)
             self.update()
 
     # ------------------------------------------------------------------
@@ -267,6 +386,10 @@ class ImageCanvas(QWidget):
 
         painter.drawPixmap(target_rect, self._pixmap, QRectF(self._pixmap.rect()))
 
+        # Draw floating paste overlay if active
+        if self.has_overlay:
+            self._draw_floating_overlay(painter)
+
         # Draw crop selection rectangle & HUD if active
         if not self._selection.isNull() and self._selection.width() > 0 and self._selection.height() > 0:
             self._draw_selection_overlay(painter, target_rect)
@@ -361,7 +484,7 @@ class ImageCanvas(QWidget):
         action_hint = (
             "Drag any border/corner inward, then press C or Enter"
             if is_full_border
-            else "Press C or Enter to Crop (Esc to cancel)"
+            else "Press C/Enter to Crop  •  Del/X to Erase/Blur (Esc to cancel)"
         )
         badge_text = f"{w} × {h} px{ar_str}  •  {action_hint}"
 
@@ -381,6 +504,55 @@ class ImageCanvas(QWidget):
         badge_rect = QRectF(bx, by, tw, th)
         painter.setBrush(QColor(15, 23, 42, 225))
         painter.setPen(QPen(QColor(56, 189, 248, 180), 1))
+        painter.drawRoundedRect(badge_rect, 5, 5)
+        painter.setPen(QColor(241, 245, 249))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+
+    def _draw_floating_overlay(self, painter: QPainter) -> None:
+        if not self.has_overlay or self._overlay_image is None:
+            return
+        ovl_widget = self.image_rect_to_widget(self._overlay_rect)
+        paint_overlay_on_painter(
+            painter,
+            self._overlay_image,
+            ovl_widget,
+            opacity=self._overlay_opacity,
+            rounded_pct=self._overlay_rounded_pct,
+            border=self._overlay_border,
+        )
+
+        # High-contrast dashed bounding box + 8 handles
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 190), 2))
+        painter.drawRect(ovl_widget)
+        painter.setPen(QPen(QColor(52, 211, 153), 1.8, Qt.PenStyle.DashLine))
+        painter.drawRect(ovl_widget)
+
+        painter.setBrush(QColor(52, 211, 153))
+        painter.setPen(QPen(QColor(15, 23, 42), 1.5))
+        for pt in self._handle_points(ovl_widget).values():
+            painter.drawEllipse(pt, 5.5, 5.5)
+
+        w, h = self._overlay_rect.width(), self._overlay_rect.height()
+        pct = round(self._overlay_opacity * 100 / 255)
+        badge_text = f"📌 Paste: {w} × {h} px ({pct}%)  •  Drag to move/resize  •  Enter to Stamp (Esc to cancel)"
+
+        font = QFont(self.font())
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(badge_text) + 18
+        th = fm.height() + 10
+
+        bx = max(8.0, min(self.width() - tw - 8.0, ovl_widget.left()))
+        by = ovl_widget.top() - th - 6.0
+        if by < 8.0:
+            by = min(self.height() - th - 8.0, ovl_widget.bottom() + 6.0)
+
+        badge_rect = QRectF(bx, by, tw, th)
+        painter.setBrush(QColor(15, 23, 42, 225))
+        painter.setPen(QPen(QColor(52, 211, 153, 195), 1))
         painter.drawRoundedRect(badge_rect, 5, 5)
         painter.setPen(QColor(241, 245, 249))
         painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
@@ -423,10 +595,10 @@ class ImageCanvas(QWidget):
             "e": QPointF(r.right(), cy),
         }
 
-    def _hit_test_selection(self, pos: QPointF) -> Optional[str]:
-        if self._selection.isNull():
+    def _hit_test_rect(self, rect: QRect, pos: QPointF, *, is_overlay: bool = False) -> Optional[str]:
+        if rect.isNull() or rect.isEmpty():
             return None
-        sel_w = self.image_rect_to_widget(self._selection)
+        sel_w = self.image_rect_to_widget(rect)
         pts = self._handle_points(sel_w)
 
         # 1. Check 4 corners first, then 4 midpoint handles
@@ -463,11 +635,16 @@ class ImageCanvas(QWidget):
 
         if sel_w.contains(pos):
             # If the crop frame is still at the full image border, dragging well inside
-            # the interior starts a freehand selection box; otherwise it moves the crop box.
-            if self._image is not None and self._selection == self._image.rect():
+            # the interior starts a freehand selection box; otherwise it moves the box.
+            if not is_overlay and self._image is not None and rect == self._image.rect():
                 return None
             return "move"
         return None
+
+    def _hit_test_selection(self, pos: QPointF) -> Optional[str]:
+        if self.has_overlay:
+            return self._hit_test_rect(self._overlay_rect, pos, is_overlay=True)
+        return self._hit_test_rect(self._selection, pos, is_overlay=False)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._image is None or self._image.isNull():
@@ -486,7 +663,7 @@ class ImageCanvas(QWidget):
             return
 
         if event.button() == Qt.MouseButton.RightButton:
-            if not self._selection.isNull():
+            if not self.has_overlay and not self._selection.isNull():
                 self.clear_selection()
             else:
                 self._drag_mode = "pan"
@@ -495,6 +672,14 @@ class ImageCanvas(QWidget):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.has_overlay:
+                hit = self._hit_test_rect(self._overlay_rect, pos, is_overlay=True)
+                if hit is not None:
+                    self._drag_mode = hit
+                    self._drag_start_image = self.widget_to_image(pos, clamp=False)
+                    self._drag_initial_sel = QRect(self._overlay_rect)
+                return
+
             hit = self._hit_test_selection(pos)
             if hit is not None:
                 self._drag_mode = hit
@@ -528,6 +713,34 @@ class ImageCanvas(QWidget):
         cur_img_pt = self.widget_to_image(pos, clamp=True)
         img_w = self._image.width()
         img_h = self._image.height()
+
+        if self.has_overlay:
+            r = QRect(self._drag_initial_sel)
+            if self._drag_mode == "move":
+                raw_pt = self.widget_to_image(pos, clamp=False)
+                dx = raw_pt.x() - self._drag_start_image.x()
+                dy = raw_pt.y() - self._drag_start_image.y()
+                nx = max(0, min(max(0, img_w - r.width()), r.left() + dx))
+                ny = max(0, min(max(0, img_h - r.height()), r.top() + dy))
+                self._overlay_rect = QRect(nx, ny, r.width(), r.height())
+            else:
+                left, top, right, bottom = r.left(), r.top(), r.left() + r.width(), r.top() + r.height()
+                if "w" in self._drag_mode:
+                    left = min(cur_img_pt.x(), right - 8)
+                if "e" in self._drag_mode:
+                    right = max(cur_img_pt.x(), left + 8)
+                if "n" in self._drag_mode:
+                    top = min(cur_img_pt.y(), bottom - 8)
+                if "s" in self._drag_mode:
+                    bottom = max(cur_img_pt.y(), top + 8)
+                self._overlay_rect = QRect(
+                    max(0, left),
+                    max(0, top),
+                    max(8, min(img_w, right) - max(0, left)),
+                    max(8, min(img_h, bottom) - max(0, top)),
+                )
+            self.update()
+            return
 
         if self._drag_mode == "new":
             x1 = min(self._drag_start_image.x(), cur_img_pt.x())

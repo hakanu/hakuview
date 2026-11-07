@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
 
 from . import __app_name__, __version__, dialogs, display_version
 from .canvas import ImageCanvas
-from .color_bar import ColorAdjustBar
+from .color_bar import ColorAdjustBar, PasteOverlayBar
 from .folder_scanner import SORT_MODES, SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
 from .formatting import human_size
 from .image_ops import (
@@ -63,8 +63,8 @@ from .image_ops import (
     compress_image_as_variant,
     is_animated_image,
     jpegtran_lossless_save,
+    load_qimage_fast,
     save_jpeg_matching_source,
-    _next_variant_path,
     save_qimage_atomic,
 )
 from .goto_dialog import GoToFileDialog
@@ -151,6 +151,8 @@ class HakuViewWindow(QMainWindow):
         self._update_check_manual = False
         self._update_runner: Optional[UpdateRunner] = None
         self._last_caption_spec = None
+        self._last_erase_style: str = "blur"
+        self._last_erase_strength: int = 60
 
         if initial_path is not None:
             self.open_path(Path(initial_path), pick_random=pick_random)
@@ -239,16 +241,24 @@ class HakuViewWindow(QMainWindow):
         self.color_bar.saveVideoRequested.connect(self.export_adjusted_video)
         self.color_bar.closeRequested.connect(self.toggle_color_bar)
 
+        self.paste_bar = PasteOverlayBar(self)
+        self.paste_bar.styleChanged.connect(self._on_paste_style_changed)
+        self.paste_bar.stitchRequested.connect(self.stitch_paste_overlay)
+        self.paste_bar.stampRequested.connect(self.stamp_paste_overlay)
+        self.paste_bar.cancelRequested.connect(self.cancel_paste_overlay)
+
         central_container = QWidget(self)
         c_layout = QVBoxLayout(central_container)
         c_layout.setContentsMargins(0, 0, 0, 0)
         c_layout.setSpacing(0)
         c_layout.addWidget(self.color_bar)
+        c_layout.addWidget(self.paste_bar)
         c_layout.addWidget(self.stack, stretch=1)
         self.setCentralWidget(central_container)
 
         self.canvas.zoomChanged.connect(self._on_zoom_changed)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
+        self.canvas.overlayChanged.connect(self._on_overlay_active_changed)
         self.canvas.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
@@ -259,6 +269,7 @@ class HakuViewWindow(QMainWindow):
         self.video_view.transformCompleted.connect(self._on_video_transformed)
         self.video_view.stripAudioCompleted.connect(self._on_video_audio_stripped)
         self.video_view.captionCompleted.connect(self._on_video_captioned)
+        self.video_view.eraseCompleted.connect(self._on_video_erased)
         self.video_view.colorExportCompleted.connect(self._on_color_export_done)
         self.video_view.colorExportFailed.connect(self._on_color_export_failed)
         self.video_view.jobStarted.connect(self._on_bg_job_started)
@@ -288,9 +299,14 @@ class HakuViewWindow(QMainWindow):
         self.btn_next = self._add_tb_button("Next ▶", self.next_item, "Next file in folder", "→")
         self.toolbar.addSeparator()
 
-        # Edit ▾ : caption, rotate / flip (and video audio/resize tools) live in one dropdown to keep the toolbar short.
+        # Edit ▾ : caption, paste overlay, rotate / flip (and video audio/resize tools) live in one dropdown to keep the toolbar short.
         self.edit_menu = QMenu(self)
         self.act_caption = self.edit_menu.addAction("💬  Add Caption / Text...   (A)", self.open_caption_dialog)
+        self.act_erase_region = self.edit_menu.addAction("🧹  Erase / Redact Region...   (X / Del)", self.open_erase_region_dialog)
+        self.act_paste_overlay = self.edit_menu.addAction("📋  Paste Image Overlay   (Ctrl+V)", self.paste_image_overlay)
+        self.act_insert_overlay = self.edit_menu.addAction(
+            "🖼  Insert Image Overlay from File...   (Ctrl+Shift+V)", self.insert_overlay_from_file_dialog
+        )
         self.edit_menu.addSeparator()
         self.edit_menu.addAction("↺  Rotate Left 90°   (L)", self.rotate_left)
         self.edit_menu.addAction("↻  Rotate Right 90°   (R)", self.rotate_right)
@@ -594,6 +610,8 @@ class HakuViewWindow(QMainWindow):
             (("V",), self.flip_vertical, None, None),
             (("C",), self.trigger_crop_action, "C", "Border Crop (drag borders, then C or Enter)"),
             (("Ctrl+Y",), self.apply_crop, "Ctrl+Y", "Apply crop selection"),
+            (("X",), self.open_erase_region_dialog, "X / Del", "Erase / blur / pixelate / heal a region on image or video"),
+            (("Delete", "Backspace"), self.delete_selected_region, None, None),
             (("B",), self.toggle_color_bar, "B", "Brightness / Contrast panel"),
             (("A", "Shift+T"), self.open_caption_dialog, "A / Shift+T", "Add caption text with background, font & size"),
             (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress (or WhatsApp Web video export)"),
@@ -609,6 +627,8 @@ class HakuViewWindow(QMainWindow):
             ((".",), lambda: self._on_key_frame_step(1), None, None),
             (("Ctrl+C",), self.copy_image_to_clipboard, "Ctrl+C", "Copy image (or current video frame)"),
             (("Ctrl+Shift+C",), self.copy_file_path, "Ctrl+Shift+C", "Copy file path"),
+            (("Ctrl+V",), self.paste_image_overlay, "Ctrl+V / Ctrl+Shift+V", "Paste floating image overlay (Shift: pick file)"),
+            (("Ctrl+Shift+V",), self.insert_overlay_from_file_dialog, None, None),
             (("F2",), self.rename_current_file, "F2", "Rename file"),
             (("0",), self.canvas.zoom_fit, "0 / 1", "Fit to window / 100% 1:1 size"),
             (("1",), self.canvas.zoom_actual, None, None),
@@ -717,7 +737,9 @@ class HakuViewWindow(QMainWindow):
             elif not event.isAutoRepeat():
                 self.canvas.set_space_pressed(True)
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if not self.current_is_video and not self.canvas.selection.isNull():
+            if not self.current_is_video and self.canvas.has_overlay:
+                self.stamp_paste_overlay()
+            elif not self.current_is_video and not self.canvas.selection.isNull():
                 self.apply_crop()
             else:
                 self.toggle_fullscreen()
@@ -729,7 +751,9 @@ class HakuViewWindow(QMainWindow):
         event.accept()
 
     def _on_escape(self) -> None:
-        if self.color_bar.isVisible():
+        if not self.current_is_video and self.canvas.has_overlay:
+            self.cancel_paste_overlay()
+        elif self.color_bar.isVisible():
             self.toggle_color_bar()
         elif self.current_is_video and self.video_view.has_trim_points():
             self.video_view.clear_trim()
@@ -762,7 +786,14 @@ class HakuViewWindow(QMainWindow):
             return
         local_path = urls[0].toLocalFile()
         if local_path:
-            self.open_path(Path(local_path))
+            p = Path(local_path)
+            shift_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if shift_held and not self.current_is_video and self.document is not None and p.is_file():
+                img = load_qimage_fast(p)
+                if img is not None and not img.isNull():
+                    self.start_paste_overlay(img)
+                    return
+            self.open_path(p)
 
     # ------------------------------------------------------------------
     # Opening & Cycling Media in Folder
@@ -924,11 +955,17 @@ class HakuViewWindow(QMainWindow):
         if self.current_is_video:
             self.video_view.transform_video("rot_left")
             return
+        if self.canvas.has_overlay:
+            self.canvas.transform_overlay("rotate_left")
+            return
         self._apply_edit(ImageDocument.rotate_left, reset_view=True)
 
     def rotate_right(self) -> None:
         if self.current_is_video:
             self.video_view.transform_video("rot_right")
+            return
+        if self.canvas.has_overlay:
+            self.canvas.transform_overlay("rotate_right")
             return
         self._apply_edit(ImageDocument.rotate_right, reset_view=True)
 
@@ -936,13 +973,133 @@ class HakuViewWindow(QMainWindow):
         if self.current_is_video:
             self.video_view.transform_video("flip_h")
             return
+        if self.canvas.has_overlay:
+            self.canvas.transform_overlay("flip_h")
+            return
         self._apply_edit(ImageDocument.flip_horizontal, reset_view=False)
 
     def flip_vertical(self) -> None:
         if self.current_is_video:
             self.video_view.transform_video("flip_v")
             return
+        if self.canvas.has_overlay:
+            self.canvas.transform_overlay("flip_v")
+            return
         self._apply_edit(ImageDocument.flip_vertical, reset_view=False)
+
+    # ------------------------------------------------------------------
+    # Floating Paste & Stamp Overlay (Ctrl+V / Ctrl+Shift+V)
+    # ------------------------------------------------------------------
+
+    def _on_overlay_active_changed(self, active: bool) -> None:
+        self.paste_bar.setVisible(active)
+        self._update_ui_state()
+
+    def _on_paste_style_changed(self, opacity: int, rounded_pct: int, border: bool) -> None:
+        self.canvas.set_overlay_style(opacity=opacity, rounded_pct=rounded_pct, border=border)
+
+    def start_paste_overlay(self, image: QImage) -> bool:
+        """Start (or chain) a floating paste overlay over the current image."""
+        if self.document is None or self.current_is_video or image is None or image.isNull():
+            self.status.showMessage("Open an image first to paste an overlay.", 3000)
+            return False
+        # If an overlay is already floating, auto-stamp it so you can mash multiple images back-to-back!
+        if self.canvas.has_overlay:
+            self.stamp_paste_overlay()
+        self.paste_bar.reset()
+        self.canvas.set_overlay_style(opacity=255, rounded_pct=0, border=False)
+        ok = self.canvas.start_overlay(image)
+        if ok:
+            self.status.showMessage(
+                "📌 Floating paste active: drag to move, drag corners to resize, Enter to Stamp (Esc to cancel).",
+                5000,
+            )
+        return ok
+
+    def paste_image_overlay(self) -> bool:
+        """Paste an image from the system clipboard as a floating overlay (or open file picker if empty)."""
+        if self.document is None or self.current_is_video:
+            self.status.showMessage("Open an image first to paste an overlay.", 3000)
+            return False
+        cb = QApplication.clipboard()
+        img = cb.image()
+        if img is None or img.isNull():
+            mime = cb.mimeData()
+            if mime is not None and mime.hasUrls():
+                for url in mime.urls():
+                    local = url.toLocalFile()
+                    if local and Path(local).is_file():
+                        loaded = load_qimage_fast(local)
+                        if loaded is not None and not loaded.isNull():
+                            img = loaded
+                            break
+            if (img is None or img.isNull()) and cb.text().strip():
+                candidate = Path(cb.text().strip())
+                if candidate.is_file():
+                    loaded = load_qimage_fast(candidate)
+                    if loaded is not None and not loaded.isNull():
+                        img = loaded
+        if img is not None and not img.isNull():
+            return self.start_paste_overlay(img)
+        return self.insert_overlay_from_file_dialog()
+
+    def insert_overlay_from_file_dialog(self) -> bool:
+        """Pick an image file from disk and place it as a floating paste overlay."""
+        if self.document is None or self.current_is_video:
+            self.status.showMessage("Open an image first to insert an overlay.", 3000)
+            return False
+        start_dir = str(self.navigator.folder) if self.navigator.folder else str(Path.home())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Insert Image Overlay",
+            start_dir,
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tiff *.avif *.heic *.ico *.svg);;All Files (*)",
+        )
+        if not file_path:
+            return False
+        img = load_qimage_fast(file_path)
+        if img is None or img.isNull():
+            QMessageBox.warning(self, __app_name__, f"Could not load image:\n{file_path}")
+            return False
+        return self.start_paste_overlay(img)
+
+    def stamp_paste_overlay(self) -> bool:
+        """Bake the active floating overlay onto the current ImageDocument (undoable with Ctrl+Z)."""
+        if self.document is None or self.current_is_video or not self.canvas.has_overlay:
+            return False
+        ovl_img = self.canvas.overlay_image
+        ovl_rect = self.canvas.overlay_rect
+        opacity = self.canvas.overlay_opacity
+        rounded = self.canvas.overlay_rounded_pct
+        border = self.canvas.overlay_border
+        self.canvas.clear_overlay()
+        if ovl_img is None or not self.document.stamp_overlay(
+            ovl_img, ovl_rect, opacity=opacity, rounded_pct=rounded, border=border
+        ):
+            return False
+        self._show_document(reset_view=False)
+        self._update_ui_state()
+        self.status.showMessage("📌 Stamped overlay onto image (Ctrl+Z to undo, Ctrl+S to save).", 4500)
+        return True
+
+    def stitch_paste_overlay(self, direction: str = "horizontal") -> bool:
+        """Stitch the active floating overlay side-by-side or below the current ImageDocument."""
+        if self.document is None or self.current_is_video or not self.canvas.has_overlay:
+            return False
+        ovl_img = self.canvas.overlay_image
+        self.canvas.clear_overlay()
+        if ovl_img is None or not self.document.stitch_with(ovl_img, direction=direction):
+            return False
+        self._show_document(reset_view=True)
+        self._update_ui_state()
+        where = "below" if direction == "vertical" else "side-by-side"
+        self.status.showMessage(f"📐 Stitched image {where} (Ctrl+Z to undo, Ctrl+S to save).", 4500)
+        return True
+
+    def cancel_paste_overlay(self) -> None:
+        if self.canvas.has_overlay:
+            self.canvas.clear_overlay()
+            self.status.showMessage("Floating paste cancelled.", 2000)
 
     def strip_video_audio(self) -> Optional[Path]:
         """Losslessly strip the audio track from the current video (-c:v copy -an)."""
@@ -1025,6 +1182,111 @@ class HakuViewWindow(QMainWindow):
             self._show_document(reset_view=False)
             self._update_ui_state()
             self.status.showMessage("💬 Caption applied to image (Ctrl+Z to undo, Ctrl+S to save).", 4500)
+            return cur
+        return None
+
+    def delete_selected_region(self) -> Optional[Path]:
+        """Fast path for Del/Backspace: immediately erase an active image selection, or open the Erase dialog."""
+        cur = self.navigator.current_file
+        if cur is None:
+            return None
+        if (
+            not self.current_is_video
+            and self.document is not None
+            and not self.canvas.selection.isNull()
+            and self.canvas.selection != self.document.current.rect()
+        ):
+            sel = QRect(self.canvas.selection)
+            self.canvas.clear_selection()
+            if self.document.erase_region(sel, style=self._last_erase_style, strength=self._last_erase_strength):
+                self._show_document(reset_view=False)
+                self._update_ui_state()
+                self.status.showMessage(
+                    f"🧹 Region deleted ({self._last_erase_style}) — Ctrl+Z to undo, X for Erase options, Ctrl+S to save.",
+                    4500,
+                )
+                return cur
+        return self.open_erase_region_dialog()
+
+    def open_erase_region_dialog(self) -> Optional[Path]:
+        """Open the interactive Erase / Redact Region dialog for the current image or video."""
+        from .erase_dialog import EraseRegionDialog, erase_image_region, sample_surrounding_color
+
+        cur = self.navigator.current_file
+        if cur is None:
+            self.status.showMessage("Open an image or video first.", 2500)
+            return None
+
+        if self.current_is_video:
+            frame = self.video_view.grab_current_frame()
+            if frame is not None and not frame.isNull() and not self.color_bar.is_neutral:
+                frame = adjust_qimage_color(frame, self.color_bar.brightness, self.color_bar.contrast)
+            trim_label = None
+            bounds = self.video_view.trim_range_bounds_ms()
+            if bounds is not None:
+                trim_label = f"{_format_ms(bounds[0])} – {_format_ms(bounds[1])}"
+            dlg = EraseRegionDialog(
+                frame=frame,
+                initial_style=self._last_erase_style,
+                initial_strength=self._last_erase_strength,
+                is_video=True,
+                trim_range_label=trim_label,
+                parent=self,
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            spec = dlg.spec()
+            self._last_erase_style = spec.style
+            self._last_erase_strength = spec.strength
+            fsize = (frame.width(), frame.height()) if (frame is not None and not frame.isNull()) else (1280, 720)
+            s_hex = sample_surrounding_color(frame, spec.rect).name() if (frame is not None and not frame.isNull()) else "#000000"
+            target = self.video_view.export_erased_video(spec, frame_size=fsize, surround_hex=s_hex)
+            if target is not None:
+                self.status.showMessage(f"⏳ Exporting redacted video ({target.name}) in the background...", 5000)
+            return target
+
+        if self.document is None:
+            return None
+        preview_img = (
+            adjust_qimage_color(self.document.current, self.color_bar.brightness, self.color_bar.contrast)
+            if not self.color_bar.is_neutral
+            else self.document.current
+        )
+        dlg = EraseRegionDialog(
+            frame=preview_img,
+            initial_rect=self.canvas.selection,
+            initial_style=self._last_erase_style,
+            initial_strength=self._last_erase_strength,
+            is_video=False,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        spec = dlg.spec()
+        self._last_erase_style = spec.style
+        self._last_erase_strength = spec.strength
+        self.canvas.clear_selection()
+
+        if dlg.save_as_copy:
+            redacted = erase_image_region(preview_img, spec.rect, style=spec.style, strength=spec.strength)
+            ext = cur.suffix if cur.suffix else ".png"
+            target = _next_variant_path(cur, "redacted", ext)
+            try:
+                self._ignore_watch_until = time.monotonic() + 1.5
+                save_qimage_atomic(redacted, target)
+                self._add_new_file_to_folder(target, "🧹 Redacted image saved")
+                return target
+            except Exception as exc:
+                QMessageBox.critical(self, "Save Error", f"Failed to save redacted image:\n{exc}")
+                return None
+
+        if self.document.erase_region(spec.rect, style=spec.style, strength=spec.strength):
+            self._show_document(reset_view=False)
+            self._update_ui_state()
+            self.status.showMessage(
+                f"🧹 Region erased ({spec.style}) — Ctrl+Z to undo, Ctrl+S to save.",
+                4500,
+            )
             return cur
         return None
 
@@ -1535,6 +1797,9 @@ class HakuViewWindow(QMainWindow):
     def _on_video_captioned(self, new_path: Path) -> None:
         self._add_new_file_to_folder(new_path, "💬 Captioned video saved")
 
+    def _on_video_erased(self, new_path: Path) -> None:
+        self._add_new_file_to_folder(new_path, "🧹 Redacted video saved")
+
     def export_adjusted_video(self) -> Optional[Path]:
         """Write a copy of the current video with the brightness/contrast baked in (background ffmpeg)."""
         if not self.current_is_video:
@@ -1674,6 +1939,10 @@ class HakuViewWindow(QMainWindow):
 
         self.btn_edit.setEnabled(is_img or is_vid)
         self.btn_caption.setEnabled(is_img or is_vid)
+        self.act_paste_overlay.setVisible(bool(is_img))
+        self.act_insert_overlay.setVisible(bool(is_img))
+        if not is_img and self.paste_bar.isVisible():
+            self.paste_bar.hide()
         self._edit_video_sep.setVisible(bool(is_vid))
         self.act_strip_audio.setVisible(bool(is_vid))
         self.act_resize_video.setVisible(bool(is_vid))
@@ -1802,10 +2071,14 @@ class HakuViewWindow(QMainWindow):
         menu.addSeparator()
 
         add("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action, is_img or is_vid)
+        add("🧹 Erase / Redact Region... (X / Del)", self.open_erase_region_dialog, is_img or is_vid)
         add("💬 Add Caption / Text... (A)", self.open_caption_dialog, is_img or is_vid)
         add("🎨 Brightness && Contrast (B)", self.toggle_color_bar, has_file)
         image_menu = menu.addMenu("🖼 Image")
         image_menu.setEnabled(is_img)
+        add("📋 Paste Image Overlay (Ctrl+V)", self.paste_image_overlay, is_img, image_menu)
+        add("🖼 Insert Image Overlay from File... (Ctrl+Shift+V)", self.insert_overlay_from_file_dialog, is_img, image_menu)
+        image_menu.addSeparator()
         add("↺ Rotate Left 90° (L)", self.rotate_left, is_img, image_menu)
         add("↻ Rotate Right 90° (R)", self.rotate_right, is_img, image_menu)
         add("⇆ Flip Horizontal (H)", self.flip_horizontal, is_img, image_menu)
