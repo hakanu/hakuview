@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://hakanu.github.io/hakuview/"
+Homepage = "https://hakuview.hakanu.net/"
 Repository = "https://github.com/hakanu/hakuview"
 Issues = "https://github.com/hakanu/hakuview/issues"
 

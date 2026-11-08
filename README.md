@@ -3,11 +3,11 @@
 > **Ultra-fast, lightweight IrfanView-inspired image & video viewer with built-in editing superpowers for Linux, macOS & Windows.**  
 > Instant middle-of-folder cycling (`←`/`→`), tactile border-drag crop (`C`), floating paste & stamp image mashups (`Ctrl+V`), CapCut/Reels-style pill captions (`A`), face/object blur & pixelation (`X`/`Del`), 9:16 → 16:9 blurred-backdrop video reframe, lossless video trim, and 1-click WhatsApp Web export.
 
-🌐 **Website & Live Video Showcase:** **[https://hakanu.github.io/hakuview/](https://hakanu.github.io/hakuview/)**  
+🌐 **Website & Live Video Showcase:** **[https://hakuview.hakanu.net/](https://hakuview.hakanu.net/)**  
 🏷️ **Tags:** `image-viewer` · `video-player` · `photo-editor` · `video-editor` · `irfanview` · `capcut` · `pyside6` · `qt6` · `ffmpeg` · `crop` · `blur-faces` · `pixelate` · `image-collage` · `whatsapp-video`
 
 <p align="center">
-  <a href="https://hakanu.github.io/hakuview/">
+  <a href="https://hakuview.hakanu.net/">
     <img src="docs/assets/screen-paste.png" alt="HakuView Floating Paste & Stamp" width="840" />
   </a>
 </p>
