@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
 
 from . import __app_name__, __version__, dialogs, display_version
 from .canvas import ImageCanvas
-from .color_bar import ColorAdjustBar, PasteOverlayBar
+from .color_bar import ColorAdjustBar, DrawAnnotateBar, PasteOverlayBar
 from .folder_scanner import SORT_MODES, SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
 from .formatting import human_size
 from .image_ops import (
@@ -64,6 +64,7 @@ from .image_ops import (
     is_animated_image,
     jpegtran_lossless_save,
     load_qimage_fast,
+    resize_qimage,
     save_jpeg_matching_source,
     save_qimage_atomic,
 )
@@ -247,18 +248,26 @@ class HakuViewWindow(QMainWindow):
         self.paste_bar.stampRequested.connect(self.stamp_paste_overlay)
         self.paste_bar.cancelRequested.connect(self.cancel_paste_overlay)
 
+        self.draw_bar = DrawAnnotateBar(self)
+        self.draw_bar.styleChanged.connect(self.canvas.set_draw_style)
+        self.draw_bar.undoStrokeRequested.connect(self._on_undo_draw_stroke)
+        self.draw_bar.applyRequested.connect(self.apply_draw_annotations)
+        self.draw_bar.cancelRequested.connect(self.cancel_draw_annotations)
+
         central_container = QWidget(self)
         c_layout = QVBoxLayout(central_container)
         c_layout.setContentsMargins(0, 0, 0, 0)
         c_layout.setSpacing(0)
         c_layout.addWidget(self.color_bar)
         c_layout.addWidget(self.paste_bar)
+        c_layout.addWidget(self.draw_bar)
         c_layout.addWidget(self.stack, stretch=1)
         self.setCentralWidget(central_container)
 
         self.canvas.zoomChanged.connect(self._on_zoom_changed)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
         self.canvas.overlayChanged.connect(self._on_overlay_active_changed)
+        self.canvas.drawModeChanged.connect(self._on_draw_mode_changed)
         self.canvas.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
@@ -299,10 +308,12 @@ class HakuViewWindow(QMainWindow):
         self.btn_next = self._add_tb_button("Next ▶", self.next_item, "Next file in folder", "→")
         self.toolbar.addSeparator()
 
-        # Edit ▾ : caption, paste overlay, rotate / flip (and video audio/resize tools) live in one dropdown to keep the toolbar short.
+        # Edit ▾ : caption, draw, resize, paste overlay, rotate / flip (and video audio/resize tools) live in one dropdown to keep the toolbar short.
         self.edit_menu = QMenu(self)
         self.act_caption = self.edit_menu.addAction("💬  Add Caption / Text...   (A)", self.open_caption_dialog)
+        self.act_draw = self.edit_menu.addAction("✏️  Draw && Annotate   (D)", self.toggle_draw_bar)
         self.act_erase_region = self.edit_menu.addAction("🧹  Erase / Redact Region...   (X / Del)", self.open_erase_region_dialog)
+        self.act_resize_image = self.edit_menu.addAction("📐  Resize / Resample Image...   (Ctrl+R)", self.open_resize_dialog)
         self.act_paste_overlay = self.edit_menu.addAction("📋  Paste Image Overlay   (Ctrl+V)", self.paste_image_overlay)
         self.act_insert_overlay = self.edit_menu.addAction(
             "🖼  Insert Image Overlay from File...   (Ctrl+Shift+V)", self.insert_overlay_from_file_dialog
@@ -612,6 +623,8 @@ class HakuViewWindow(QMainWindow):
             (("Ctrl+Y",), self.apply_crop, "Ctrl+Y", "Apply crop selection"),
             (("X",), self.open_erase_region_dialog, "X / Del", "Erase / blur / pixelate / heal a region on image or video"),
             (("Delete", "Backspace"), self.delete_selected_region, None, None),
+            (("D",), self.toggle_draw_bar, "D", "Draw & Annotate (Pen, Marker, Arrow, Box, Circle)"),
+            (("Ctrl+R",), self.open_resize_dialog, "Ctrl+R", "Resize / Resample image or reframe video"),
             (("B",), self.toggle_color_bar, "B", "Brightness / Contrast panel"),
             (("A", "Shift+T"), self.open_caption_dialog, "A / Shift+T", "Add caption text with background, font & size"),
             (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress (or WhatsApp Web video export)"),
@@ -737,7 +750,9 @@ class HakuViewWindow(QMainWindow):
             elif not event.isAutoRepeat():
                 self.canvas.set_space_pressed(True)
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if not self.current_is_video and self.canvas.has_overlay:
+            if not self.current_is_video and self.canvas.draw_mode:
+                self.apply_draw_annotations()
+            elif not self.current_is_video and self.canvas.has_overlay:
                 self.stamp_paste_overlay()
             elif not self.current_is_video and not self.canvas.selection.isNull():
                 self.apply_crop()
@@ -751,7 +766,9 @@ class HakuViewWindow(QMainWindow):
         event.accept()
 
     def _on_escape(self) -> None:
-        if not self.current_is_video and self.canvas.has_overlay:
+        if not self.current_is_video and self.canvas.draw_mode:
+            self.cancel_draw_annotations()
+        elif not self.current_is_video and self.canvas.has_overlay:
             self.cancel_paste_overlay()
         elif self.color_bar.isVisible():
             self.toggle_color_bar()
@@ -1101,6 +1118,116 @@ class HakuViewWindow(QMainWindow):
             self.canvas.clear_overlay()
             self.status.showMessage("Floating paste cancelled.", 2000)
 
+    def _on_draw_mode_changed(self, active: bool) -> None:
+        self.draw_bar.setVisible(active)
+
+    def toggle_draw_bar(self) -> bool:
+        """Toggle the Quick Draw & Annotate toolbar (D)."""
+        if self.current_is_video or self.document is None:
+            self.status.showMessage("Open an image first to draw and annotate.", 2500)
+            return False
+        if self.canvas.draw_mode:
+            if self.canvas.draw_strokes:
+                return self.apply_draw_annotations()
+            self.cancel_draw_annotations()
+            return False
+        ok = self.canvas.start_draw_mode(
+            tool=self.draw_bar.tool,
+            color=self.draw_bar.color_hex,
+            size=self.draw_bar.size_px,
+        )
+        if ok:
+            self.status.showMessage(
+                "✏️ Draw mode active: drag on canvas to draw • Enter to Apply • Ctrl+Z to undo stroke • Esc to cancel.",
+                4500,
+            )
+        return ok
+
+    def _on_undo_draw_stroke(self) -> None:
+        if self.canvas.undo_draw_stroke():
+            self.status.showMessage("Undid last drawn stroke.", 2000)
+        else:
+            self.status.showMessage("No uncommitted strokes to undo.", 2000)
+
+    def apply_draw_annotations(self) -> bool:
+        """Bake all active drawn strokes onto the current ImageDocument (undoable with Ctrl+Z)."""
+        if self.document is None or self.current_is_video or not self.canvas.draw_mode:
+            return False
+        strokes = self.canvas.draw_strokes
+        self.canvas.stop_draw_mode()
+        if not strokes:
+            self.status.showMessage("Draw mode closed (no strokes drawn).", 2000)
+            return False
+        if not self.document.apply_annotations(strokes):
+            return False
+        self._show_document(reset_view=False)
+        self._update_ui_state()
+        self.status.showMessage(
+            f"✏️ Applied {len(strokes)} annotation{'s' if len(strokes) != 1 else ''} (Ctrl+Z to undo, Ctrl+S to save).",
+            4500,
+        )
+        return True
+
+    def cancel_draw_annotations(self) -> None:
+        if self.canvas.draw_mode:
+            self.canvas.stop_draw_mode()
+            self.status.showMessage("Draw mode cancelled.", 2000)
+
+    def open_resize_dialog(self) -> Optional[Path]:
+        """Open the Image Resize / Resample dialog (Ctrl+R) or Video Reframe dialog."""
+        if self.current_is_video:
+            return self.resize_video_dialog()
+        cur = self.navigator.current_file
+        if cur is None or self.document is None:
+            self.status.showMessage("Open an image or video first to resize.", 2500)
+            return None
+
+        from .resize_dialog import ImageResizeDialog
+
+        preview_img = (
+            adjust_qimage_color(self.document.current, self.color_bar.brightness, self.color_bar.contrast)
+            if not self.color_bar.is_neutral
+            else self.document.current
+        )
+        dlg = ImageResizeDialog(frame=preview_img, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        tw, th = dlg.target_width, dlg.target_height
+        mode = dlg.mode
+        resample = dlg.resample_filter
+        bg_hex = dlg.bg_color_hex
+
+        if dlg.save_as_copy:
+            resized = resize_qimage(
+                preview_img,
+                tw,
+                th,
+                mode=mode,
+                resample=resample,
+                bg_color=bg_hex,
+            )
+            ext = cur.suffix if cur.suffix else ".png"
+            target = _next_variant_path(cur, f"{tw}x{th}", ext)
+            try:
+                self._ignore_watch_until = time.monotonic() + 1.5
+                save_qimage_atomic(resized, target)
+                self._add_new_file_to_folder(target, f"📐 Resized image ({tw}×{th}) saved")
+                return target
+            except Exception as exc:
+                QMessageBox.critical(self, "Save Error", f"Failed to save resized image:\n{exc}")
+                return None
+
+        if self.document.resize_image(tw, th, mode=mode, resample=resample, bg_color=bg_hex):
+            self._show_document(reset_view=True)
+            self._update_ui_state()
+            self.status.showMessage(
+                f"📐 Resized to {tw} × {th} px (Ctrl+Z to undo, Ctrl+S to save).",
+                4500,
+            )
+            return cur
+        return None
+
     def strip_video_audio(self) -> Optional[Path]:
         """Losslessly strip the audio track from the current video (-c:v copy -an)."""
         if not self.current_is_video:
@@ -1344,6 +1471,9 @@ class HakuViewWindow(QMainWindow):
 
     def undo_edit(self) -> None:
         if self.document is None or self.current_is_video:
+            return
+        if self.canvas.draw_mode and self.canvas.undo_draw_stroke():
+            self.status.showMessage("Undid last drawn stroke.", 2000)
             return
         if self.document.undo():
             self._show_document(reset_view=True)
@@ -1939,10 +2069,14 @@ class HakuViewWindow(QMainWindow):
 
         self.btn_edit.setEnabled(is_img or is_vid)
         self.btn_caption.setEnabled(is_img or is_vid)
+        self.act_draw.setVisible(bool(is_img))
+        self.act_resize_image.setVisible(bool(is_img))
         self.act_paste_overlay.setVisible(bool(is_img))
         self.act_insert_overlay.setVisible(bool(is_img))
         if not is_img and self.paste_bar.isVisible():
             self.paste_bar.hide()
+        if not is_img and self.draw_bar.isVisible():
+            self.draw_bar.hide()
         self._edit_video_sep.setVisible(bool(is_vid))
         self.act_strip_audio.setVisible(bool(is_vid))
         self.act_resize_video.setVisible(bool(is_vid))
@@ -2076,6 +2210,8 @@ class HakuViewWindow(QMainWindow):
         add("🎨 Brightness && Contrast (B)", self.toggle_color_bar, has_file)
         image_menu = menu.addMenu("🖼 Image")
         image_menu.setEnabled(is_img)
+        add("✏️ Draw && Annotate (D)", self.toggle_draw_bar, is_img, image_menu)
+        add("📐 Resize / Resample... (Ctrl+R)", self.open_resize_dialog, is_img, image_menu)
         add("📋 Paste Image Overlay (Ctrl+V)", self.paste_image_overlay, is_img, image_menu)
         add("🖼 Insert Image Overlay from File... (Ctrl+Shift+V)", self.insert_overlay_from_file_dialog, is_img, image_menu)
         image_menu.addSeparator()

@@ -67,6 +67,10 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   Drag a box over any unwanted face, license plate, watermark, or object and press `Delete` (or press `X` to open the interactive **Erase / Redact Region** dialog for both **images** and **videos**). Choose between **🌫️ Heavy Blur**, **🟦 Pixelate / Mosaic**, **🪄 Smart Heal / Delogo** (interpolates surrounding pixels), **🎨 Surrounding Color Fill**, or **⬛ Blackout** — with optional In/Out timestamp scoping on videos.
 - 💬 **Caption / Text Overlay (`💬 Text` or `A` / `Shift+T`)**  
   Add single- or multi-line captions to both **images** and **videos** with a live preview, quick style presets (Reels Dark Pill, Light Pill, Yellow Highlight, Snapchat Full-Width Banner, Classic Impact Meme Outline, Cinema Subtitle), custom fonts & sizes, custom text/box colors & opacity, and flexible placement. Apply non-destructively to images (`Ctrl+Z` undo) or export captioned videos (`<name>_caption.mp4`, optionally scoped to marked In/Out trim points).
+- ✏️ **Quick Draw & Annotate (`D`)**  
+  Press `D` to reveal the annotation bar above the canvas with **✒ Pen**, **🖍 Neon Highlighter**, **↗ Pointer Arrow**, **▭ Rounded Box**, **◯ Circle / Ellipse**, and **╱ Line**, 1-click color swatches, and thickness slider. Undo individual strokes with `Ctrl+Z`, then press `Enter` to bake onto the image undo stack.
+- 📐 **Image Resize, Resample & Reframe (`Ctrl+R`)**  
+  Press `Ctrl+R` on any image to resize by **Pixels (`W × H`)** or **Percentage (`25%` – `200%`)** with aspect-ratio lock, **Smooth Lanczos** vs **Crisp Nearest Neighbor (Pixel Art)** filtering, or CapCut-style **Blurred Dominant-Color Backdrop** reframing (`16:9`, `1:1`, `4:5`, `9:16`). Apply in-place (`Ctrl+Z` undoable) or save as a new copy.
 - 📌 **Floating Paste & Stamp / Image Mashup (`Ctrl+V` / `Ctrl+Shift+V`)**  
   Copy any image (`Ctrl+C`), cycle to another photo (`→`), and press `Ctrl+V` (or pick a file with `Ctrl+Shift+V` / `Shift+Drop`) to float it on top. Drag to move, drag the 8 handles to resize, rotate/flip the floating piece with `R`/`L`/`H`/`V`, tweak **Opacity**, **Rounded Corners**, or **Frame & Shadow**, or click **◫ Side-by-Side** / **⊟ Stack Below** to stitch images together. Press `Enter` (or `Ctrl+V` again to chain another image!) to stamp it into the `Ctrl+Z` undo stack.
 - 🔄 **Quick Rotate & Flip (`R` / `L` / `H` / `V`)**  
@@ -102,6 +106,8 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `Ctrl + M` | Jump to a random file (also under `⋮` More Options) |
 | `C` | **Border Crop** (drag borders inward, then press `C` or `Enter` to commit) |
 | `Del` / `Backspace` or `X` | **Delete / Erase / Blur Region** (Blur, Pixelate, Smart Heal/Delogo, or Blackout a face/object on images & videos) |
+| `D` | **Quick Draw & Annotate** (Pen, Highlighter, Arrow, Box, Circle, Line + color swatches) |
+| `Ctrl + R` | **Resize / Resample Image** (by pixels, percentage, or CapCut blurred backdrop) or Reframe Video |
 | `B` | **Color Scaling** (Live brightness & contrast sliders for images and videos) |
 | `A` or `Shift + T` | **Add Caption / Text** (Fonts, sizes, pill/banner/outline backgrounds for images & videos) |
 | `R` / `L` | Rotate 90° Right / Left |
@@ -146,8 +152,8 @@ Why use **HakuView** instead of traditional viewers (**IrfanView**, **XnView MP*
 | **Lossless Video Trim (`[`/`]` + `T`) & Mute** | ✅ **Yes (Instant stream copy)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ Always re-encodes |
 | **1-Click WhatsApp Web Video Fix (`< 16 MB`)** | ✅ **Yes (`K`)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ Manual export settings |
 | **Geeky Codec / BPP / EXIF Inspector (`I`)** | ✅ **Yes** | ✅ Yes (`I`) | ✅ Yes | ❌ No | ❌ No | ❌ Basic info |
-| **Freehand Pen / Arrow / Shape Drawing** | ❌ *Not yet* | ⚠️ Paint plugin | ⚠️ Basic draw | ✅ **Yes (Full paint)** | ✅ **Yes (Full paint)** | ⚠️ Stickers / Draw |
-| **Image Pixel / % Resize (`Ctrl+R` Resample)** | ❌ *Video only so far* | ✅ **Yes (`Ctrl+R`)** | ✅ **Yes** | ✅ **Yes** | ✅ **Yes** | ✅ Yes |
+| **Freehand Pen / Arrow / Shape Drawing** | ✅ **Yes (`D` — Pen, Marker, Arrow, Box, Circle)** | ⚠️ Paint plugin | ⚠️ Basic draw | ✅ **Yes (Full paint)** | ✅ **Yes (Full paint)** | ⚠️ Stickers / Draw |
+| **Image Pixel / % Resize (`Ctrl+R` Resample)** | ✅ **Yes (`Ctrl+R` + Blurred Pad)** | ✅ **Yes (`Ctrl+R`)** | ✅ **Yes** | ✅ **Yes** | ✅ **Yes** | ✅ Yes |
 | **Batch Convert / Batch Rename (100s of files)** | ❌ *Single-file focus* | ✅ **Yes (`B`)** | ✅ **Yes** | ❌ No | ❌ No | ❌ No |
 | **Folder Thumbnail Grid / Contact Sheet** | ❌ *Fast 1-by-1 viewer* | ✅ **Yes (`T`)** | ✅ **Yes** | ❌ No | ❌ No | ✅ Media bin |
 | **Multi-Track Video Timeline & Keyframes** | ❌ *Quick clip tools* | ❌ No | ❌ No | ❌ No | ❌ No | ✅ **Yes (Full NLE)** |

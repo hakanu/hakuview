@@ -22,7 +22,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from .image_ops import flip_qimage, paint_overlay_on_painter, rotate_qimage
+from .image_ops import DrawStroke, flip_qimage, paint_overlay_on_painter, render_draw_stroke, rotate_qimage
 from .theme import PALETTE
 
 
@@ -32,6 +32,7 @@ class ImageCanvas(QWidget):
     zoomChanged = Signal(float)
     selectionChanged = Signal(QRect)  # Emitted in image pixel coordinates
     overlayChanged = Signal(bool)  # True when a floating paste overlay is active
+    drawModeChanged = Signal(bool)  # True when quick draw & annotate mode is active
     doubleClicked = Signal()
     wheelNavigate = Signal(int)  # +1 = next file, -1 = previous (when the wheel is set to navigate)
 
@@ -58,7 +59,15 @@ class ImageCanvas(QWidget):
         self._overlay_rounded_pct: int = 0
         self._overlay_border: bool = False
 
-        self._drag_mode: Optional[str] = None  # 'new', 'move', 'n','s','e','w','ne','nw','se','sw', 'pan'
+        # Quick draw & annotate mode in image pixel coordinates
+        self._draw_mode: bool = False
+        self._draw_tool: str = "arrow"
+        self._draw_color: str = "#ef4444"
+        self._draw_size: int = 6
+        self._draw_strokes: list[DrawStroke] = []
+        self._active_stroke: Optional[DrawStroke] = None
+
+        self._drag_mode: Optional[str] = None  # 'new', 'move', 'n','s','e','w','ne','nw','se','sw', 'pan', 'draw'
         self._drag_start_widget: QPointF = QPointF()
         self._drag_start_image: QPoint = QPoint()
         self._drag_initial_sel: QRect = QRect()
@@ -91,6 +100,7 @@ class ImageCanvas(QWidget):
         self.clear_selection()
         if reset_view:
             self.clear_overlay()
+            self.stop_draw_mode()
 
         if movie_path is not None and movie_path.suffix.lower() in (".gif", ".webp"):
             movie = QMovie(str(movie_path))
@@ -264,6 +274,65 @@ class ImageCanvas(QWidget):
             self.update()
 
     # ------------------------------------------------------------------
+    # Quick Draw & Annotate Mode
+    # ------------------------------------------------------------------
+
+    @property
+    def draw_mode(self) -> bool:
+        return self._draw_mode
+
+    @property
+    def draw_strokes(self) -> list[DrawStroke]:
+        return list(self._draw_strokes)
+
+    def start_draw_mode(self, tool: str = "arrow", color: str = "#ef4444", size: int = 6) -> bool:
+        if self._image is None or self._image.isNull():
+            return False
+        self.clear_selection()
+        self.clear_overlay()
+        self._draw_mode = True
+        self._draw_tool = tool
+        self._draw_color = color
+        self._draw_size = max(1, int(size))
+        self._draw_strokes.clear()
+        self._active_stroke = None
+        self.drawModeChanged.emit(True)
+        self.update()
+        return True
+
+    def stop_draw_mode(self) -> None:
+        was_active = self._draw_mode or bool(self._draw_strokes)
+        self._draw_mode = False
+        self._draw_strokes.clear()
+        self._active_stroke = None
+        if was_active:
+            self.drawModeChanged.emit(False)
+            self.update()
+
+    def set_draw_style(self, tool: str, color: str, size: int) -> None:
+        self._draw_tool = tool
+        self._draw_color = color
+        self._draw_size = max(1, int(size))
+
+    def add_draw_stroke(self, stroke: DrawStroke) -> None:
+        if stroke.points:
+            self._draw_strokes.append(stroke)
+            self.update()
+
+    def undo_draw_stroke(self) -> bool:
+        if not self._draw_strokes:
+            return False
+        self._draw_strokes.pop()
+        self.update()
+        return True
+
+    def clear_draw_strokes(self) -> None:
+        if self._draw_strokes or self._active_stroke is not None:
+            self._draw_strokes.clear()
+            self._active_stroke = None
+            self.update()
+
+    # ------------------------------------------------------------------
     # Zoom & Pan controls
     # ------------------------------------------------------------------
 
@@ -389,6 +458,14 @@ class ImageCanvas(QWidget):
         # Draw floating paste overlay if active
         if self.has_overlay:
             self._draw_floating_overlay(painter)
+
+        # Draw uncommitted quick-draw annotations if active
+        if self._draw_strokes or self._active_stroke is not None:
+            offset = target_rect.topLeft()
+            for stroke in self._draw_strokes:
+                render_draw_stroke(painter, stroke, scale=self._scale, offset=offset)
+            if self._active_stroke is not None:
+                render_draw_stroke(painter, self._active_stroke, scale=self._scale, offset=offset)
 
         # Draw crop selection rectangle & HUD if active
         if not self._selection.isNull() and self._selection.width() > 0 and self._selection.height() > 0:
@@ -672,6 +749,18 @@ class ImageCanvas(QWidget):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._draw_mode:
+                self._drag_mode = "draw"
+                img_pt = self.widget_to_image(pos, clamp=True)
+                self._active_stroke = DrawStroke(
+                    tool=self._draw_tool,
+                    color=self._draw_color,
+                    size=self._draw_size,
+                    points=[QPointF(img_pt)],
+                )
+                self.update()
+                return
+
             if self.has_overlay:
                 hit = self._hit_test_rect(self._overlay_rect, pos, is_overlay=True)
                 if hit is not None:
@@ -713,6 +802,18 @@ class ImageCanvas(QWidget):
         cur_img_pt = self.widget_to_image(pos, clamp=True)
         img_w = self._image.width()
         img_h = self._image.height()
+
+        if self._drag_mode == "draw" and self._active_stroke is not None:
+            pt_f = QPointF(cur_img_pt)
+            if self._active_stroke.tool in ("pen", "highlighter"):
+                self._active_stroke.points.append(pt_f)
+            else:
+                if len(self._active_stroke.points) == 1:
+                    self._active_stroke.points.append(pt_f)
+                else:
+                    self._active_stroke.points[-1] = pt_f
+            self.update()
+            return
 
         if self.has_overlay:
             r = QRect(self._drag_initial_sel)
@@ -777,6 +878,13 @@ class ImageCanvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._drag_mode == "draw" and self._active_stroke is not None:
+            if self._active_stroke.points:
+                self._draw_strokes.append(self._active_stroke)
+            self._active_stroke = None
+            self._drag_mode = None
+            self.update()
+            return
         if self._drag_mode == "new":
             if self._selection.width() < 4 or self._selection.height() < 4:
                 self.clear_selection()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass, field
 import importlib.util
+import math
 import os
 from pathlib import Path
 import shutil
@@ -12,9 +14,9 @@ import tempfile
 import threading
 from typing import List, Optional, Tuple
 
-from PIL import Image, ImageOps, JpegImagePlugin
-from PySide6.QtCore import QObject, QRect, QRectF, QRunnable, QSize, QThreadPool, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QTransform
+from PIL import Image, ImageFilter, ImageOps, JpegImagePlugin
+from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QRunnable, QSize, QThreadPool, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
 from .formatting import human_size
 from .proc import no_window
@@ -234,6 +236,215 @@ def stitch_images(base: QImage, other: QImage, direction: str = "horizontal") ->
     if base.format() in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32):
         return canvas.convertToFormat(base.format())
     return canvas
+
+
+@dataclass
+class DrawStroke:
+    """A single freehand or geometric annotation stroke in image pixel coordinates."""
+
+    tool: str = "pen"  # "pen", "highlighter", "arrow", "rect", "ellipse", "line"
+    color: str = "#ef4444"
+    size: int = 6
+    points: List[QPointF] = field(default_factory=list)
+
+
+def render_draw_stroke(
+    painter: QPainter,
+    stroke: DrawStroke,
+    *,
+    scale: float = 1.0,
+    offset: QPointF = QPointF(0.0, 0.0),
+) -> None:
+    """Render `stroke` onto `painter`, optionally mapped from image pixels via `offset + pt * scale`."""
+    if not stroke.points:
+        return
+
+    def _map(pt: QPointF) -> QPointF:
+        return QPointF(offset.x() + pt.x() * scale, offset.y() + pt.y() * scale)
+
+    pts = [_map(p) for p in stroke.points]
+    c = QColor(stroke.color) if QColor(stroke.color).isValid() else QColor("#ef4444")
+    pen_w = max(1.5, float(stroke.size) * scale)
+
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    if stroke.tool == "highlighter":
+        c.setAlpha(95)
+        pen = QPen(c, pen_w * 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if len(pts) == 1:
+            painter.drawPoint(pts[0])
+        else:
+            path = QPainterPath(pts[0])
+            for p in pts[1:]:
+                path.lineTo(p)
+            painter.drawPath(path)
+
+    elif stroke.tool == "pen":
+        pen = QPen(c, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if len(pts) == 1:
+            painter.setBrush(c)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(pts[0], pen_w / 2.0, pen_w / 2.0)
+        else:
+            path = QPainterPath(pts[0])
+            for p in pts[1:]:
+                path.lineTo(p)
+            painter.drawPath(path)
+
+    elif stroke.tool == "line":
+        p0, p1 = pts[0], pts[-1]
+        pen = QPen(c, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(p0, p1)
+
+    elif stroke.tool == "arrow":
+        p0, p1 = pts[0], pts[-1]
+        dx = p1.x() - p0.x()
+        dy = p1.y() - p0.y()
+        length = math.hypot(dx, dy)
+        pen = QPen(c, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        if length < 2.0:
+            painter.drawPoint(p0)
+        else:
+            head_len = max(12.0 * scale, min(length * 0.65, pen_w * 3.6))
+            head_angle = math.radians(28.0)
+            angle = math.atan2(dy, dx)
+            # Draw shaft slightly inset so it doesn't poke through the arrowhead tip
+            shaft_end = QPointF(
+                p1.x() - math.cos(angle) * (head_len * 0.55),
+                p1.y() - math.sin(angle) * (head_len * 0.55),
+            )
+            painter.drawLine(p0, shaft_end)
+            left_wing = QPointF(
+                p1.x() - head_len * math.cos(angle - head_angle),
+                p1.y() - head_len * math.sin(angle - head_angle),
+            )
+            right_wing = QPointF(
+                p1.x() - head_len * math.cos(angle + head_angle),
+                p1.y() - head_len * math.sin(angle + head_angle),
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(c)
+            painter.drawPolygon(QPolygonF([p1, left_wing, right_wing]))
+
+    elif stroke.tool in ("rect", "ellipse"):
+        p0, p1 = pts[0], pts[-1]
+        rect = QRectF(
+            min(p0.x(), p1.x()),
+            min(p0.y(), p1.y()),
+            abs(p1.x() - p0.x()),
+            abs(p1.y() - p0.y()),
+        )
+        pen = QPen(c, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if stroke.tool == "ellipse":
+            painter.drawEllipse(rect)
+        else:
+            rad = min(rect.width(), rect.height()) * 0.08
+            painter.drawRoundedRect(rect, rad, rad)
+
+    painter.restore()
+
+
+def apply_draw_strokes(base: QImage, strokes: List[DrawStroke]) -> QImage:
+    """Return a copy of `base` with all `strokes` rendered onto it."""
+    if base is None or base.isNull() or not strokes:
+        return base
+    out = base.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    painter = QPainter(out)
+    for s in strokes:
+        render_draw_stroke(painter, s, scale=1.0, offset=QPointF(0.0, 0.0))
+    painter.end()
+    if base.format() in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32):
+        return out.convertToFormat(base.format())
+    return out
+
+
+def resize_qimage(
+    image: QImage,
+    width: int,
+    height: int,
+    *,
+    mode: str = "scale",
+    resample: str = "lanczos",
+    bg_color: str = "#0f172a",
+    blur_sigma: int = 28,
+) -> QImage:
+    """Resize or reframe `image` to `(width, height)`.
+
+    Modes:
+    - "scale": Direct resample to `(width, height)` using `resample` ("lanczos", "bilinear", "nearest").
+    - "pad_blur": Aspect-fit inside `(width, height)` over a Gaussian-blurred + dominant-tinted backdrop.
+    - "pad_solid": Aspect-fit inside `(width, height)` over a solid `bg_color` canvas.
+    - "crop_fill": Aspect-expand to cover `(width, height)` and center-crop.
+    """
+    if image is None or image.isNull():
+        return image
+    tw = max(1, int(width))
+    th = max(1, int(height))
+    pil_src = _qimage_to_pil(image)
+
+    resample_map = {
+        "lanczos": Image.Resampling.LANCZOS,
+        "bilinear": Image.Resampling.BILINEAR,
+        "nearest": Image.Resampling.NEAREST,
+    }
+    pil_filter = resample_map.get(resample, Image.Resampling.LANCZOS)
+
+    if mode == "scale":
+        resized = pil_src.resize((tw, th), resample=pil_filter)
+    elif mode == "crop_fill":
+        src_w, src_h = max(1, pil_src.width), max(1, pil_src.height)
+        scale = max(tw / src_w, th / src_h)
+        sw = max(tw, int(round(src_w * scale)))
+        sh = max(th, int(round(src_h * scale)))
+        scaled = pil_src.resize((sw, sh), resample=pil_filter)
+        left = max(0, (sw - tw) // 2)
+        top = max(0, (sh - th) // 2)
+        resized = scaled.crop((left, top, left + tw, top + th))
+    elif mode in ("pad_blur", "pad_solid"):
+        src_w, src_h = max(1, pil_src.width), max(1, pil_src.height)
+        fit_scale = min(tw / src_w, th / src_h)
+        fw = max(1, min(tw, int(round(src_w * fit_scale))))
+        fh = max(1, min(th, int(round(src_h * fit_scale))))
+        fg = pil_src.resize((fw, fh), resample=pil_filter)
+
+        qc = QColor(bg_color) if QColor(bg_color).isValid() else QColor("#0f172a")
+        if mode == "pad_solid":
+            bg = Image.new("RGBA", (tw, th), (qc.red(), qc.green(), qc.blue(), 255))
+        else:
+            # CapCut-style blurred cover backdrop tinted with bg_color
+            cov_scale = max(tw / src_w, th / src_h)
+            cw = max(tw, int(round(src_w * cov_scale)))
+            ch = max(th, int(round(src_h * cov_scale)))
+            bg_cov = pil_src.convert("RGB").resize((cw, ch), resample=Image.Resampling.BILINEAR)
+            bx = max(0, (cw - tw) // 2)
+            by = max(0, (ch - th) // 2)
+            bg_crop = bg_cov.crop((bx, by, bx + tw, by + th))
+            sigma = max(4, min(80, int(blur_sigma)))
+            blurred = bg_crop.filter(ImageFilter.GaussianBlur(radius=sigma * 0.45))
+            tint = Image.new("RGB", (tw, th), (qc.red(), qc.green(), qc.blue()))
+            bg = Image.blend(blurred, tint, alpha=0.28).convert("RGBA")
+
+        ox = (tw - fw) // 2
+        oy = (th - fh) // 2
+        bg.paste(fg, (ox, oy), fg)
+        resized = bg
+    else:
+        resized = pil_src.resize((tw, th), resample=pil_filter)
+
+    rgba_bytes = resized.convert("RGBA").tobytes("raw", "RGBA")
+    out = QImage(rgba_bytes, tw, th, tw * 4, QImage.Format.Format_RGBA8888).copy()
+    if image.format() in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32):
+        return out.convertToFormat(image.format())
+    return out
 
 
 def save_qimage_atomic(image: QImage, target_path: Path | str, quality: int = 95) -> None:
@@ -586,6 +797,38 @@ class ImageDocument:
             return False
         self._push_undo("erase")
         self.current = erase_image_region(self.current, bounded, style=style, strength=strength)
+        return True
+
+    def resize_image(
+        self,
+        width: int,
+        height: int,
+        *,
+        mode: str = "scale",
+        resample: str = "lanczos",
+        bg_color: str = "#0f172a",
+        blur_sigma: int = 28,
+    ) -> bool:
+        tw, th = max(1, int(width)), max(1, int(height))
+        if mode == "scale" and tw == self.current.width() and th == self.current.height():
+            return False
+        self._push_undo("resize")
+        self.current = resize_qimage(
+            self.current,
+            tw,
+            th,
+            mode=mode,
+            resample=resample,
+            bg_color=bg_color,
+            blur_sigma=blur_sigma,
+        )
+        return True
+
+    def apply_annotations(self, strokes: List[DrawStroke]) -> bool:
+        if not strokes:
+            return False
+        self._push_undo("annotate")
+        self.current = apply_draw_strokes(self.current, strokes)
         return True
 
     def undo(self) -> bool:

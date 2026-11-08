@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QButtonGroup, QCheckBox, QColorDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
 
 
 class ColorAdjustBar(QWidget):
@@ -225,3 +226,156 @@ class PasteOverlayBar(QWidget):
     def _update_labels(self) -> None:
         self.lbl_opacity.setText(f"{round(self.opacity * 100 / 255)}%")
         self.lbl_rounded.setText(f"{self.rounded_pct}%")
+
+
+DRAW_TOOLS: list[tuple[str, str, str]] = [
+    ("✒ Pen", "pen", "Freehand pen stroke"),
+    ("🖍 Marker", "highlighter", "Semi-transparent neon highlighter"),
+    ("↗ Arrow", "arrow", "Directional pointer arrow"),
+    ("▭ Box", "rect", "Rounded rectangle callout"),
+    ("◯ Circle", "ellipse", "Circle / ellipse callout"),
+    ("╱ Line", "line", "Straight line segment"),
+]
+
+DRAW_SWATCHES: list[tuple[str, str]] = [
+    ("Red", "#ef4444"),
+    ("Yellow", "#facc15"),
+    ("Green", "#22c55e"),
+    ("Sky Blue", "#38bdf8"),
+    ("White", "#ffffff"),
+    ("Dark", "#0f172a"),
+]
+
+
+class DrawAnnotateBar(QWidget):
+    """Quick Draw & Annotate toolbar shown above the canvas when drawing mode (D) is active."""
+
+    styleChanged = Signal(str, str, int)  # tool, color_hex, size
+    undoStrokeRequested = Signal()
+    applyRequested = Signal()
+    cancelRequested = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("colorBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._tool: str = "arrow"
+        self._color: str = "#ef4444"
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(6)
+
+        title = QLabel("✏️ Draw:", self)
+        title.setObjectName("colorTitle")
+        layout.addWidget(title)
+
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        self.tool_buttons: dict[str, QPushButton] = {}
+        for label, tool_id, tip in DRAW_TOOLS:
+            btn = QPushButton(label, self)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            if tool_id == self._tool:
+                btn.setChecked(True)
+            btn.clicked.connect(lambda _checked=False, tid=tool_id: self.set_tool(tid))
+            self.tool_group.addButton(btn)
+            self.tool_buttons[tool_id] = btn
+            layout.addWidget(btn)
+
+        # Color swatches
+        self.swatch_buttons: dict[str, QPushButton] = {}
+        for name, hex_code in DRAW_SWATCHES:
+            sbtn = QPushButton("", self)
+            sbtn.setFixedSize(22, 22)
+            sbtn.setToolTip(f"Color: {name} ({hex_code})")
+            sbtn.clicked.connect(lambda _checked=False, hc=hex_code: self.set_color(hc))
+            self.swatch_buttons[hex_code.lower()] = sbtn
+            layout.addWidget(sbtn)
+
+        self.btn_custom_color = QPushButton("🎨", self)
+        self.btn_custom_color.setFixedWidth(30)
+        self.btn_custom_color.setToolTip("Pick custom annotation color...")
+        self.btn_custom_color.clicked.connect(self._pick_custom_color)
+        layout.addWidget(self.btn_custom_color)
+
+        layout.addWidget(QLabel("Size:", self))
+        self.slider_size = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider_size.setRange(2, 36)
+        self.slider_size.setValue(6)
+        self.slider_size.setFixedWidth(72)
+        self.slider_size.setToolTip("Stroke thickness (2px to 36px)")
+        self.slider_size.valueChanged.connect(self._on_size_changed)
+        layout.addWidget(self.slider_size)
+        self.lbl_size = QLabel("6px", self)
+        self.lbl_size.setObjectName("colorValue")
+        self.lbl_size.setFixedWidth(32)
+        layout.addWidget(self.lbl_size)
+
+        self.btn_undo_stroke = QPushButton("↶ Undo", self)
+        self.btn_undo_stroke.setToolTip("Undo last drawn stroke")
+        self.btn_undo_stroke.clicked.connect(self.undoStrokeRequested.emit)
+        layout.addWidget(self.btn_undo_stroke)
+
+        self.btn_apply = QPushButton("✓ Apply (Enter)", self)
+        self.btn_apply.setObjectName("btnSaveAdj")
+        self.btn_apply.setToolTip("Bake annotations onto image (Enter) — undoable with Ctrl+Z")
+        self.btn_apply.clicked.connect(self.applyRequested.emit)
+        layout.addWidget(self.btn_apply)
+
+        layout.addStretch(1)
+
+        self.btn_cancel = QPushButton("✕", self)
+        self.btn_cancel.setToolTip("Discard unapplied strokes and exit Draw mode (Esc)")
+        self.btn_cancel.clicked.connect(self.cancelRequested.emit)
+        layout.addWidget(self.btn_cancel)
+
+        self._refresh_swatch_styles()
+        self.hide()
+
+    @property
+    def tool(self) -> str:
+        return self._tool
+
+    @property
+    def color_hex(self) -> str:
+        return self._color
+
+    @property
+    def size_px(self) -> int:
+        return int(self.slider_size.value())
+
+    def set_tool(self, tool_id: str) -> None:
+        if tool_id not in self.tool_buttons:
+            return
+        self._tool = tool_id
+        self.tool_buttons[tool_id].setChecked(True)
+        self.styleChanged.emit(self._tool, self._color, self.size_px)
+
+    def set_color(self, hex_code: str) -> None:
+        c = QColor(hex_code)
+        if not c.isValid():
+            return
+        self._color = c.name().lower()
+        self._refresh_swatch_styles()
+        self.styleChanged.emit(self._tool, self._color, self.size_px)
+
+    def _pick_custom_color(self) -> None:
+        c = QColorDialog.getColor(QColor(self._color), self, "Pick Annotation Color")
+        if c.isValid():
+            self.set_color(c.name())
+
+    def _on_size_changed(self, val: int) -> None:
+        self.lbl_size.setText(f"{val}px")
+        self.styleChanged.emit(self._tool, self._color, self.size_px)
+
+    def _refresh_swatch_styles(self) -> None:
+        for hc, btn in self.swatch_buttons.items():
+            selected = hc == self._color.lower()
+            ring = "2px solid #38bdf8" if selected else "1px solid rgba(148,163,184,0.45)"
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {hc}; border: {ring}; border-radius: 11px; min-width: 18px; max-width: 22px; min-height: 18px; max-height: 22px; padding: 0px; }}"
+            )
+

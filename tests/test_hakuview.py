@@ -2372,5 +2372,133 @@ def test_video_erase_region_dialog_and_ffmpeg_worker(tmp_path: Path, qtbot, monk
         assert done == [dest] and dest.exists()
 
 
+def test_image_resize_dialog_scale_reframe_undo_and_save_copy(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+    from hakuview.image_ops import resize_qimage
+    from hakuview.resize_dialog import ImageResizeDialog
+
+    base = QImage(200, 100, QImage.Format.Format_RGB32)
+    base.fill(QColor(30, 120, 210))
+    for y in range(25, 75):
+        for x in range(50, 150):
+            base.setPixelColor(x, y, QColor(240, 200, 50))
+
+    # 1. Direct resize_qimage across all 4 modes & filters
+    scaled = resize_qimage(base, 100, 50, mode="scale", resample="lanczos")
+    assert (scaled.width(), scaled.height()) == (100, 50)
+
+    padded_blur = resize_qimage(base, 160, 160, mode="pad_blur", bg_color="#112233")
+    assert (padded_blur.width(), padded_blur.height()) == (160, 160)
+
+    padded_solid = resize_qimage(base, 160, 160, mode="pad_solid", bg_color="#ff0000")
+    assert (padded_solid.width(), padded_solid.height()) == (160, 160)
+    assert padded_solid.pixelColor(5, 5) == QColor("#ff0000")
+
+    cropped = resize_qimage(base, 120, 120, mode="crop_fill", resample="nearest")
+    assert (cropped.width(), cropped.height()) == (120, 120)
+
+    # 2. ImageResizeDialog percentage lock, presets, and swap
+    dlg = ImageResizeDialog(frame=base)
+    qtbot.addWidget(dlg)
+    assert (dlg.target_width, dlg.target_height) == (200, 100)
+    dlg.set_percentage(50)
+    assert (dlg.target_width, dlg.target_height) == (100, 50)
+    dlg.spin_width.setValue(300)
+    assert dlg.target_height == 150  # aspect ratio locked
+
+    dlg.swap_dimensions()
+    assert (dlg.target_width, dlg.target_height) == (150, 300)
+    assert dlg.mode == "pad_blur"
+
+    # 3. HakuViewWindow.open_resize_dialog (Ctrl+R) in-place with Ctrl+Z undo, plus Save as New Image
+    img_path = tmp_path / "photo.png"
+    base.save(str(img_path))
+    win = HakuViewWindow(initial_path=img_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+
+    def accept_half(self):
+        self.set_percentage(50)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ImageResizeDialog, "exec", accept_half)
+    assert win.open_resize_dialog() == img_path
+    assert win.document.modified and win.document.ops == ["resize"]
+    assert (win.document.current.width(), win.document.current.height()) == (100, 50)
+
+    win.undo_edit()
+    assert not win.document.modified
+    assert (win.document.current.width(), win.document.current.height()) == (200, 100)
+
+    def accept_save_copy(self):
+        self.set_percentage(150)
+        self._save_as_copy = True
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ImageResizeDialog, "exec", accept_save_copy)
+    saved = win.open_resize_dialog()
+    assert saved == tmp_path / "photo_300x150.png"
+    assert saved.exists() and saved in win.navigator.files
+
+
+def test_quick_draw_and_annotate_tools_undo_and_apply(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtCore import QPointF
+    from PySide6.QtTest import QTest
+    from hakuview.image_ops import DrawStroke
+
+    base = QImage(240, 180, QImage.Format.Format_RGB32)
+    base.fill(QColor(245, 245, 245))
+    img_path = tmp_path / "canvas.png"
+    base.save(str(img_path))
+
+    win = HakuViewWindow(initial_path=img_path)
+    qtbot.addWidget(win)
+    win._prompt_unsaved = False
+    win.show()
+
+    # 1. Press D (toggle_draw_bar) to enter Draw & Annotate mode
+    assert win.toggle_draw_bar()
+    assert win.canvas.draw_mode
+    assert win.draw_bar.isVisible()
+
+    # Change tool, color, and size from DrawAnnotateBar
+    win.draw_bar.set_tool("arrow")
+    win.draw_bar.set_color("#ef4444")
+    win.draw_bar.slider_size.setValue(8)
+    assert win.canvas._draw_tool == "arrow"
+    assert win.canvas._draw_color == "#ef4444"
+    assert win.canvas._draw_size == 8
+
+    # Add strokes for all 6 supported tools (pen, highlighter, arrow, rect, ellipse, line)
+    for idx, tool in enumerate(("pen", "highlighter", "arrow", "rect", "ellipse", "line")):
+        y = 20 + idx * 22
+        win.canvas.add_draw_stroke(
+            DrawStroke(
+                tool=tool,
+                color="#ef4444",
+                size=6,
+                points=[QPointF(30, y), QPointF(120, y + 10), QPointF(190, y + 14)],
+            )
+        )
+    assert len(win.canvas.draw_strokes) == 6
+
+    # 2. Undo while in draw mode pops only the last uncommitted stroke
+    win.undo_edit()
+    assert len(win.canvas.draw_strokes) == 5
+
+    # 3. Press Enter to bake annotations onto the ImageDocument
+    QTest.keyClick(win, Qt.Key.Key_Return)
+    assert not win.canvas.draw_mode
+    assert not win.draw_bar.isVisible()
+    assert win.document.modified and win.document.ops == ["annotate"]
+    assert win.document.current != base
+
+    # 4. Ctrl+Z restores the clean un-annotated image
+    win.undo_edit()
+    assert not win.document.modified
+    assert win.document.current == base
+
+
+
 
 
