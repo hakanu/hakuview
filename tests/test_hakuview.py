@@ -883,7 +883,7 @@ def test_more_button_stays_visible_when_toolbar_overflows(tmp_path: Path, qtbot)
     assert win.toolbar.sizeHint().width() <= win.width()
     narrow_visible = [b for b in win._responsive_tb_buttons if b._tb_action.isVisible()]
     assert not win.btn_draw._tb_action.isVisible()
-    assert not win.btn_random._tb_action.isVisible()
+    assert not win.btn_shuffle_jump._tb_action.isVisible()
     assert not win.btn_settings._tb_action.isVisible()
 
     # Every folded button remains accessible inside the 3-dots menu
@@ -904,7 +904,7 @@ def test_more_button_stays_visible_when_toolbar_overflows(tmp_path: Path, qtbot)
     assert win.btn_paste._tb_action.isVisible()
     assert win.btn_rot_left._tb_action.isVisible()
     assert win.btn_rot_right._tb_action.isVisible()
-    assert win.btn_random._tb_action.isVisible()
+    assert win.btn_shuffle_jump._tb_action.isVisible()
     assert win.btn_goto._tb_action.isVisible()
     assert win.btn_settings._tb_action.isVisible()
 
@@ -2550,6 +2550,120 @@ def test_macos_app_bundle_install_and_uninstall(tmp_path: Path, monkeypatch) -> 
     un_msg = installer.uninstall_desktop_integration()
     assert "Removed macOS application bundle" in un_msg
     assert not app_bundle.exists()
+
+
+def test_quick_filters_and_undo(tmp_path: Path, qtbot) -> None:
+    img_path = tmp_path / "01_red.png"
+    _create_sample_image(img_path, width=40, height=30, color=QColor(220, 40, 40))
+    win = HakuViewWindow(initial_path=img_path, check_updates=False)
+    win._prompt_unsaved = False
+    qtbot.addWidget(win)
+    orig = win.document.current.copy()
+
+    # 1. Grayscale filter turns pure red into equal R=G=B gray
+    assert win.apply_image_filter("grayscale")
+    c_gray = win.document.current.pixelColor(10, 10)
+    assert c_gray.red() == c_gray.green() == c_gray.blue()
+    assert win.document.modified
+
+    # 2. Undo restores original red
+    win.undo_edit()
+    assert not win.document.modified
+    assert win.document.current == orig
+
+    # 3. Invert filter turns red (220, 40, 40) into cyan (35, 215, 215)
+    assert win.apply_image_filter("invert")
+    c_inv = win.document.current.pixelColor(10, 10)
+    assert c_inv.red() == 255 - orig.pixelColor(10, 10).red()
+    assert c_inv.green() == 255 - orig.pixelColor(10, 10).green()
+
+
+def test_eyedropper_picks_pixel_and_copies_hex(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QGuiApplication
+
+    img_path = tmp_path / "01_red.png"
+    _create_sample_image(img_path, width=40, height=30, color=QColor(220, 40, 40))
+    win = HakuViewWindow(initial_path=img_path, check_updates=False)
+    qtbot.addWidget(win)
+    win.show()
+
+    win.toggle_eyedropper()
+    assert win.canvas.eyedropper_mode
+
+    res = win.canvas.pick_color_at_image_point(QPoint(5, 5))
+    assert res is not None
+    hex_code, color, _pt = res
+    assert not win.canvas.eyedropper_mode
+    expected_hex = win.document.current.pixelColor(5, 5).name().upper()
+    assert hex_code == expected_hex
+    assert QGuiApplication.clipboard().text().upper() == expected_hex
+    assert win.draw_bar.color_hex.upper() == expected_hex
+
+
+def test_strip_exif_metadata_creates_clean_copy(tmp_path: Path, qtbot) -> None:
+    from PIL import Image
+
+    img_path = tmp_path / "photo_with_exif.jpg"
+    im = Image.new("RGB", (64, 48), (40, 120, 200))
+    exif = im.getexif()
+    exif[0x010F] = "HakuCamera"
+    exif[0x0110] = "ModelX"
+    im.save(img_path, format="JPEG", exif=exif.tobytes(), quality=92)
+
+    win = HakuViewWindow(initial_path=img_path, check_updates=False)
+    qtbot.addWidget(win)
+    clean_path = win.strip_current_metadata()
+    assert clean_path is not None and clean_path.exists()
+    assert clean_path.name == "photo_with_exif_clean.jpg"
+
+    with Image.open(clean_path) as clean_im:
+        assert len(clean_im.getexif()) == 0
+        assert clean_im.size == (64, 48)
+
+
+def test_video_gif_export_worker_command(tmp_path: Path) -> None:
+    from hakuview.video_view import _GifExportWorker
+
+    src = tmp_path / "sample.mp4"
+    dest = tmp_path / "sample_clip.gif"
+    worker = _GifExportWorker(src, dest, start_ms=1500, end_ms=4500, fps=15, max_width=540)
+    assert "palettegen" in worker.filter_expression()
+    assert "paletteuse" in worker.filter_expression()
+    attempts = worker._attempts("ffmpeg")
+    cmd0 = attempts[0][0]
+    assert "-ss" in cmd0 and "1.500" in cmd0
+    assert "-t" in cmd0 and "3.000" in cmd0
+    assert str(dest) == cmd0[-1]
+
+
+def test_move_current_to_trash_advances_to_next_file(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtCore import QFile
+
+    _create_sample_image(tmp_path / "01_red.png", width=40, height=30, color=QColor(220, 40, 40))
+    _create_sample_image(tmp_path / "02_green.jpg", width=40, height=30, color=QColor(40, 200, 40))
+    trash_dir = tmp_path.parent / "trash_bin_test"
+    trash_dir.mkdir(exist_ok=True)
+
+    def _fake_move_to_trash(path_str: str):
+        p = Path(path_str)
+        if not p.exists():
+            return False, ""
+        dest = trash_dir / p.name
+        p.rename(dest)
+        return True, str(dest)
+
+    monkeypatch.setattr(QFile, "moveToTrash", staticmethod(_fake_move_to_trash))
+
+    win = HakuViewWindow(initial_path=tmp_path / "01_red.png", check_updates=False)
+    qtbot.addWidget(win)
+    assert win.navigator.current_file.name == "01_red.png"
+
+    assert win.move_current_to_trash()
+    assert not (tmp_path / "01_red.png").exists()
+    assert (trash_dir / "01_red.png").exists()
+    assert win.navigator.current_file.name == "02_green.jpg"
+
 
 
 

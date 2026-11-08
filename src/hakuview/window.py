@@ -8,11 +8,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QProcess, QRect, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QFile, QFileSystemWatcher, QPoint, QProcess, QRect, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QGuiApplication,
     QAction,
     QActionGroup,
+    QColor,
     QDesktopServices,
     QDragEnterEvent,
     QDropEvent,
@@ -67,6 +68,7 @@ from .image_ops import (
     resize_qimage,
     save_jpeg_matching_source,
     save_qimage_atomic,
+    strip_image_metadata,
 )
 from .goto_dialog import GoToFileDialog
 from .info_dialog import MediaInfoDialog
@@ -268,12 +270,14 @@ class HakuViewWindow(QMainWindow):
         self.canvas.selectionChanged.connect(self._on_selection_changed)
         self.canvas.overlayChanged.connect(self._on_overlay_active_changed)
         self.canvas.drawModeChanged.connect(self._on_draw_mode_changed)
+        self.canvas.colorPicked.connect(self._on_color_picked)
         self.canvas.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
         self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
         self.video_view.trimCompleted.connect(self._on_video_trimmed)
         self.video_view.whatsappCompleted.connect(self._on_video_whatsapp_done)
+        self.video_view.gifCompleted.connect(self._on_video_gif_done)
         self.video_view.resizeCompleted.connect(self._on_video_resized)
         self.video_view.transformCompleted.connect(self._on_video_transformed)
         self.video_view.stripAudioCompleted.connect(self._on_video_audio_stripped)
@@ -320,6 +324,18 @@ class HakuViewWindow(QMainWindow):
         self.act_insert_overlay = self.edit_menu.addAction(
             "🖼  Insert Image Overlay from File...   (Ctrl+Shift+V)", self.insert_overlay_from_file_dialog
         )
+        self.act_eyedropper = self.edit_menu.addAction(
+            "🎨  Pick Pixel Color (Eyedropper)   (P / Alt+Click)", self.toggle_eyedropper
+        )
+        self.filter_menu = self.edit_menu.addMenu("✨  Quick Filters")
+        self.filter_menu.addAction("⚡  Auto-Levels (Stretch Contrast)   (Shift+A)", lambda: self.apply_image_filter("auto_levels"))
+        self.filter_menu.addAction("🔍  Sharpen (Unsharp Mask)   (Shift+S)", lambda: self.apply_image_filter("sharpen"))
+        self.filter_menu.addAction("⚫  Grayscale   (Shift+G)", lambda: self.apply_image_filter("grayscale"))
+        self.filter_menu.addAction("🌗  Invert Colors   (Shift+N)", lambda: self.apply_image_filter("invert"))
+        self.filter_menu.addAction("📜  Vintage Sepia", lambda: self.apply_image_filter("sepia"))
+        self.act_strip_exif = self.edit_menu.addAction(
+            "🔒  Strip EXIF / GPS Metadata (Clean Copy)", self.strip_current_metadata
+        )
         self.edit_menu.addSeparator()
         self.edit_menu.addAction("↺  Rotate Left 90°   (L)", self.rotate_left)
         self.edit_menu.addAction("↻  Rotate Right 90°   (R)", self.rotate_right)
@@ -327,6 +343,7 @@ class HakuViewWindow(QMainWindow):
         self.edit_menu.addAction("⇅  Flip Vertical   (V)", self.flip_vertical)
         self._edit_video_sep = self.edit_menu.addSeparator()
         self.act_strip_audio = self.edit_menu.addAction("🔇  Strip Audio (Lossless)", self.strip_video_audio)
+        self.act_export_gif = self.edit_menu.addAction("🎞️  Export Animated GIF...   (G)", self.export_gif_video)
         self.act_resize_video = self.edit_menu.addAction("📐  Resize && Reframe Video...", self.resize_video_dialog)
         self.btn_edit = self._add_tb_dropdown("Edit", "Add caption, rotate and flip image or video", self.edit_menu, "editMenuButton")
         self.btn_caption = self._add_tb_button(
@@ -436,13 +453,13 @@ class HakuViewWindow(QMainWindow):
             "▶ Slideshow", "Start/stop the slideshow  (W / F5) — arrow: interval & shuffle",
             self.slideshow_menu, "slideshowButton", slot=self.toggle_slideshow, checkable=True,
         )
-        self.btn_random = self._add_tb_button(
+        self.btn_shuffle_jump = self._add_tb_button(
             "🎲 Random",
             self.random_item,
             "Jump to a random file in the current folder",
             "Ctrl+M",
         )
-        self.btn_random.setEnabled(False)
+        self.btn_shuffle_jump.setEnabled(False)
         self.btn_goto = self._add_tb_button(
             "🔎 Go To",
             self.show_goto_dialog,
@@ -495,7 +512,7 @@ class HakuViewWindow(QMainWindow):
             self.btn_paste,
             self.btn_rot_left,
             self.btn_rot_right,
-            self.btn_random,
+            self.btn_shuffle_jump,
             self.btn_goto,
             self.btn_settings,
         ]
@@ -743,7 +760,14 @@ class HakuViewWindow(QMainWindow):
             (("X",), self.open_erase_region_dialog, "X / Del", "Erase / blur / pixelate / heal a region on image or video"),
             (("Delete", "Backspace"), self.delete_selected_region, None, None),
             (("D",), self.toggle_draw_bar, "D", "Draw & Annotate (Pen, Marker, Arrow, Box, Circle)"),
+            (("P",), self.toggle_eyedropper, "P / Alt+Click", "Eyedropper: pick pixel color & copy #HEX to clipboard"),
             (("Ctrl+R",), self.open_resize_dialog, "Ctrl+R", "Resize / Resample image or reframe video"),
+            (("G",), self._on_key_g, "G", "Video: export clip (or [In, Out] range) as animated GIF"),
+            (("Shift+G",), lambda: self.apply_image_filter("grayscale"), "Shift+G / S / A / N", "Quick Filters: Grayscale / Sharpen / Auto-Levels / Invert"),
+            (("Shift+S",), lambda: self.apply_image_filter("sharpen"), None, None),
+            (("Shift+A",), lambda: self.apply_image_filter("auto_levels"), None, None),
+            (("Shift+N",), lambda: self.apply_image_filter("invert"), None, None),
+            (("Shift+Delete", "Shift+Backspace"), self.move_current_to_trash, "Shift+Del", "Move current file to OS Trash / Recycle Bin"),
             (("B",), self.toggle_color_bar, "B", "Brightness / Contrast panel"),
             (("A", "Shift+T"), self.open_caption_dialog, "A / Shift+T", "Add caption text with background, font & size"),
             (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress (or WhatsApp Web video export)"),
@@ -833,6 +857,10 @@ class HakuViewWindow(QMainWindow):
         if self.current_is_video:
             self.video_view.toggle_mute()
 
+    def _on_key_g(self) -> None:
+        if self.current_is_video:
+            self.export_gif_video()
+
     def _mark_trim_in(self) -> None:
         self.video_view.set_trim_in()
         self.status.showMessage(f"✂ Mark In: {_format_ms(self.video_view.trim_in_ms or 0)}", 3000)
@@ -885,7 +913,10 @@ class HakuViewWindow(QMainWindow):
         event.accept()
 
     def _on_escape(self) -> None:
-        if not self.current_is_video and self.canvas.draw_mode:
+        if not self.current_is_video and self.canvas.eyedropper_mode:
+            self.canvas.set_eyedropper_mode(False)
+            self.status.showMessage("Eyedropper cancelled.", 2000)
+        elif not self.current_is_video and self.canvas.draw_mode:
             self.cancel_draw_annotations()
         elif not self.current_is_video and self.canvas.has_overlay:
             self.cancel_paste_overlay()
@@ -1834,6 +1865,99 @@ class HakuViewWindow(QMainWindow):
         self.status.showMessage(f"✏ Renamed to {target.name}", 3000)
         return target
 
+    def move_current_to_trash(self) -> bool:
+        """Move the currently viewed file to the OS Trash / Recycle Bin and advance to the next file."""
+        cur = self.navigator.current_file
+        if cur is None or not cur.exists():
+            return False
+        name = cur.name
+        folder = self.navigator.folder
+        prev_idx = self.navigator.index
+        self._ignore_watch_until = time.monotonic() + 1.5
+        if self.current_is_video:
+            self.video_view.stop()
+        ok, _trash_path = QFile.moveToTrash(str(cur))
+        if not ok:
+            QMessageBox.warning(self, "Move to Trash Failed", f"Could not move '{name}' to the Trash / Recycle Bin.")
+            return False
+        self.cache.invalidate(cur)
+        if folder is not None and folder.exists():
+            if self.navigator.load_target(folder) is not None and self.navigator.count > 0:
+                self.navigator.index = max(0, min(prev_idx, self.navigator.count - 1))
+                self._display_current_file()
+            else:
+                self.document = None
+                self.current_is_video = False
+                self.canvas.set_image(None)
+                self._update_ui_state()
+        self.status.showMessage(f"🗑️ Moved '{name}' to Trash.", 4000)
+        return True
+
+    def toggle_eyedropper(self) -> None:
+        """Toggle pixel color picker / eyedropper mode (P or Alt+Click)."""
+        if self.current_is_video or self.document is None:
+            return
+        active = not self.canvas.eyedropper_mode
+        self.canvas.set_eyedropper_mode(active)
+        if active:
+            self.status.showMessage(
+                "🎨 Eyedropper active: click any pixel to copy its #HEX color (or Alt+Click anytime • Esc to cancel).",
+                6000,
+            )
+        else:
+            self.status.clearMessage()
+
+    def _on_color_picked(self, hex_code: str, color: QColor, pt: QPoint) -> None:
+        cb = QGuiApplication.clipboard()
+        if cb is not None:
+            cb.setText(hex_code)
+        # Sync picked color into the Draw & Annotate bar so drawing immediately uses the sampled color
+        self.draw_bar.set_color(hex_code)
+        rgb_str = f"rgb({color.red()}, {color.green()}, {color.blue()})"
+        self.status.showMessage(
+            f"🎨 Picked {hex_code}  •  {rgb_str} at ({pt.x()}, {pt.y()}) — Copied to clipboard!",
+            5000,
+        )
+
+    def apply_image_filter(self, filter_name: str) -> bool:
+        """Apply a 1-click filter ('auto_levels', 'sharpen', 'grayscale', 'invert', 'sepia') onto the undo stack."""
+        if self.current_is_video or self.document is None:
+            return False
+        labels = {
+            "auto_levels": "⚡ Auto-Levels",
+            "sharpen": "🔍 Sharpen",
+            "grayscale": "⚫ Grayscale",
+            "invert": "🌗 Invert Colors",
+            "sepia": "📜 Vintage Sepia",
+        }
+        if not self.document.apply_filter(filter_name):
+            return False
+        self._show_document(reset_view=False)
+        self._update_ui_state()
+        self.status.showMessage(
+            f"{labels.get(filter_name, filter_name)} applied (Ctrl+Z to undo, Ctrl+S to save).",
+            3500,
+        )
+        return True
+
+    def strip_current_metadata(self, in_place: bool = False) -> Optional[Path]:
+        """Save a clean metadata-free copy (<name>_clean.<ext>) with EXIF, GPS, XMP & comment tags stripped."""
+        if self.current_is_video or self.document is None:
+            return None
+        try:
+            out_path, tag_count = strip_image_metadata(self.document, in_place=in_place)
+        except Exception as exc:
+            QMessageBox.critical(self, "Metadata Strip Error", f"Could not strip metadata:\n{exc}")
+            return None
+        self.navigator.load_target(self.document.path)
+        self._update_ui_state()
+        tag_note = f" ({tag_count} metadata tags removed)" if tag_count > 0 else " (verified clean)"
+        self.status.showMessage(
+            f"🔒 Saved privacy-clean image{tag_note}: {out_path.name} (Press → to view)",
+            6500,
+        )
+        return out_path
+
     def show_in_file_manager(self) -> None:
         """Open the folder with the current file selected (falls back to just opening the folder)."""
         cur = self.navigator.current_file
@@ -2027,6 +2151,23 @@ class HakuViewWindow(QMainWindow):
             pass
         self._add_new_file_to_folder(new_path, f"📱 WhatsApp video saved{stats}")
 
+    def export_gif_video(self) -> Optional[Path]:
+        """Export the current video (or marked [In, Out] trim range) as a palette-optimized animated GIF."""
+        if not self.current_is_video:
+            return None
+        target = self.video_view.export_gif()
+        if target is not None:
+            self.status.showMessage(f"⏳ Exporting animated GIF ({target.name})...", 5000)
+        return target
+
+    def _on_video_gif_done(self, new_path: Path) -> None:
+        size_note = ""
+        try:
+            size_note = f" [{human_size(new_path.stat().st_size)}]"
+        except OSError:
+            pass
+        self._add_new_file_to_folder(new_path, f"🎞️ Animated GIF saved{size_note}")
+
     def resize_video_dialog(self) -> Optional[Path]:
         """Open the CapCut-style video resize/reframe dialog and start background export."""
         if not self.current_is_video:
@@ -2196,18 +2337,22 @@ class HakuViewWindow(QMainWindow):
         self.btn_paste.setEnabled(bool(is_img))
         self.btn_rot_left.setEnabled(is_img or is_vid)
         self.btn_rot_right.setEnabled(is_img or is_vid)
-        self.btn_random.setEnabled(self.navigator.count > 1)
+        self.btn_shuffle_jump.setEnabled(self.navigator.count > 1)
         self.btn_goto.setEnabled(self.navigator.count > 0)
         self.act_draw.setVisible(bool(is_img))
         self.act_resize_image.setVisible(bool(is_img))
         self.act_paste_overlay.setVisible(bool(is_img))
         self.act_insert_overlay.setVisible(bool(is_img))
+        self.act_eyedropper.setVisible(bool(is_img))
+        self.filter_menu.menuAction().setVisible(bool(is_img))
+        self.act_strip_exif.setVisible(bool(is_img))
         if not is_img and self.paste_bar.isVisible():
             self.paste_bar.hide()
         if not is_img and self.draw_bar.isVisible():
             self.draw_bar.hide()
         self._edit_video_sep.setVisible(bool(is_vid))
         self.act_strip_audio.setVisible(bool(is_vid))
+        self.act_export_gif.setVisible(bool(is_vid))
         self.act_resize_video.setVisible(bool(is_vid))
         self.btn_crop.setEnabled(is_img or is_vid)
         if is_vid:
@@ -2326,10 +2471,14 @@ class HakuViewWindow(QMainWindow):
         if is_vid:
             add("🖼 Save Current Frame (S)", self.save_video_frame, True, file_menu)
             add("📱 Export WhatsApp Video (K)", self.export_whatsapp_video, True, file_menu)
+            add("🎞️ Export Animated GIF (G)", self.export_gif_video, True, file_menu)
             add("📐 Resize && Reframe Video...", self.resize_video_dialog, True, file_menu)
             add("🔇 Strip Audio (Lossless)", self.strip_video_audio, True, file_menu)
+        else:
+            add("🔒 Strip EXIF / GPS Metadata (Clean Copy)", self.strip_current_metadata, is_img, file_menu)
         add("Copy File Path (Ctrl+Shift+C)", self.copy_file_path, has_file, file_menu)
         add("✏ Rename... (F2)", self.rename_current_file, has_file, file_menu)
+        add("🗑️ Move to Trash (Shift+Del)", self.move_current_to_trash, has_file, file_menu)
         add("Show in File Manager", self.show_in_file_manager, has_file, file_menu)
         add("Open in Default App", self.open_in_default_app, has_file, file_menu)
         menu.addSeparator()
@@ -2341,9 +2490,16 @@ class HakuViewWindow(QMainWindow):
         image_menu = menu.addMenu("🖼 Image")
         image_menu.setEnabled(is_img)
         add("✏️ Draw && Annotate (D)", self.toggle_draw_bar, is_img, image_menu)
+        add("🎨 Pick Pixel Color / Eyedropper (P)", self.toggle_eyedropper, is_img, image_menu)
         add("📐 Resize / Resample... (Ctrl+R)", self.open_resize_dialog, is_img, image_menu)
         add("📋 Paste Image Overlay (Ctrl+V)", self.paste_image_overlay, is_img, image_menu)
         add("🖼 Insert Image Overlay from File... (Ctrl+Shift+V)", self.insert_overlay_from_file_dialog, is_img, image_menu)
+        filters_sub = image_menu.addMenu("✨ Quick Filters")
+        add("⚡ Auto-Levels (Shift+A)", lambda: self.apply_image_filter("auto_levels"), is_img, filters_sub)
+        add("🔍 Sharpen (Shift+S)", lambda: self.apply_image_filter("sharpen"), is_img, filters_sub)
+        add("⚫ Grayscale (Shift+G)", lambda: self.apply_image_filter("grayscale"), is_img, filters_sub)
+        add("🌗 Invert Colors (Shift+N)", lambda: self.apply_image_filter("invert"), is_img, filters_sub)
+        add("📜 Vintage Sepia", lambda: self.apply_image_filter("sepia"), is_img, filters_sub)
         image_menu.addSeparator()
         add("↺ Rotate Left 90° (L)", self.rotate_left, is_img, image_menu)
         add("↻ Rotate Right 90° (R)", self.rotate_right, is_img, image_menu)

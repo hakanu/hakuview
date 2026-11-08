@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
@@ -381,6 +382,62 @@ class _WhatsAppWorker(_FfmpegJob):
             str(self.dest_path),
         ]
         return [(cmd, 0)]
+
+
+class _GifExportWorker(_FfmpegJob):
+    """Exports a video (or marked [In, Out] trim range) as a high-quality palette-optimized animated GIF."""
+
+    label = "GIF export"
+
+    def __init__(
+        self,
+        src_path: Path,
+        dest_path: Path,
+        start_ms: int = 0,
+        end_ms: Optional[int] = None,
+        fps: int = 15,
+        max_width: int = 540,
+    ) -> None:
+        clip_dur: Optional[float] = None
+        if end_ms is not None and end_ms > start_ms:
+            clip_dur = (end_ms - start_ms) / 1000.0
+        super().__init__(src_path, dest_path, expected_duration_sec=clip_dur)
+        self.start_ms = max(0, int(start_ms))
+        self.end_ms = int(end_ms) if end_ms is not None else None
+        self.fps = max(5, min(30, int(fps)))
+        self.max_width = max(160, min(1280, int(max_width)))
+
+    def filter_expression(self) -> str:
+        return (
+            f"fps={self.fps},scale='min({self.max_width},iw)':-1:flags=lanczos,"
+            "split[s0][s1];[s0]palettegen=max_colors=192:stats_mode=diff[p];"
+            "[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+        )
+
+    def _attempts(self, ffmpeg: str) -> list[tuple[list[str], int]]:
+        seek_args: list[str] = []
+        if self.start_ms > 0:
+            seek_args += ["-ss", f"{self.start_ms / 1000.0:.3f}"]
+        dur_args: list[str] = []
+        if self.end_ms is not None and self.end_ms > self.start_ms:
+            dur_args += ["-t", f"{(self.end_ms - self.start_ms) / 1000.0:.3f}"]
+        else:
+            # Cap untrimmed GIF exports at 15 seconds so long videos stay snappy
+            dur_args += ["-t", "15.0"]
+
+        palette_cmd = [
+            ffmpeg, "-y", *seek_args, "-i", str(self.src_path), *dur_args,
+            "-vf", self.filter_expression(),
+            "-loop", "0",
+            str(self.dest_path),
+        ]
+        fallback_cmd = [
+            ffmpeg, "-y", *seek_args, "-i", str(self.src_path), *dur_args,
+            "-vf", f"fps={self.fps},scale='min({self.max_width},iw)':-1:flags=lanczos",
+            "-loop", "0",
+            str(self.dest_path),
+        ]
+        return [(palette_cmd, 0), (fallback_cmd, 0)]
 
 
 def extract_dominant_color(image: Optional[QImage]) -> QColor:
@@ -1289,6 +1346,7 @@ class VideoPlayerWidget(QWidget):
     transcodeCompleted = Signal(Path)
     trimCompleted = Signal(Path)
     whatsappCompleted = Signal(Path)
+    gifCompleted = Signal(Path)
     resizeCompleted = Signal(Path)
     transformCompleted = Signal(Path, str)
     stripAudioCompleted = Signal(Path)
@@ -1335,6 +1393,8 @@ class VideoPlayerWidget(QWidget):
         # Transport bar
         self.controls_bar = QWidget(self)
         self.controls_bar.setObjectName("videoControls")  # styled by theme.APP_QSS
+        self.controls_bar.setMinimumWidth(0)
+        self.controls_bar.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         bar_layout = QHBoxLayout(self.controls_bar)
         bar_layout.setContentsMargins(8, 5, 8, 5)
         bar_layout.setSpacing(5)
@@ -1390,6 +1450,14 @@ class VideoPlayerWidget(QWidget):
         self.btn_whatsapp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_whatsapp.clicked.connect(self.export_whatsapp)
         bar_layout.addWidget(self.btn_whatsapp)
+
+        self.btn_gif = QPushButton("🎞️ GIF")
+        self.btn_gif.setToolTip(
+            "Export clip (or marked [In, Out] range) as a high-quality animated GIF (Shortcut: G)"
+        )
+        self.btn_gif.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_gif.clicked.connect(self.export_gif)
+        bar_layout.addWidget(self.btn_gif)
 
         self.btn_resize = QPushButton("📐 Resize")
         self.btn_resize.setToolTip(
@@ -1570,6 +1638,8 @@ class VideoPlayerWidget(QWidget):
     def _restore_job_buttons(self) -> None:
         self.btn_whatsapp.setEnabled(True)
         self.btn_whatsapp.setText("📱 WhatsApp")
+        self.btn_gif.setEnabled(True)
+        self.btn_gif.setText("🎞️ GIF")
         self.btn_resize.setEnabled(True)
         self.btn_resize.setText("📐 Resize")
         self.btn_transcode.setEnabled(True)
@@ -1734,6 +1804,30 @@ class VideoPlayerWidget(QWidget):
         self.btn_whatsapp.setEnabled(True)
         self.btn_whatsapp.setText("📱 WhatsApp")
         QMessageBox.warning(self, "WhatsApp Export Error", error)
+
+    def export_gif(self) -> Optional[Path]:
+        """Export the video (or marked [In, Out] trim range) as a palette-optimized animated GIF (<name>_clip.gif)."""
+        if self._current_path is None:
+            return None
+        dest_path = _next_variant_path(self._current_path, "clip", ".gif")
+        start_ms = self.trim_in_ms if self.trim_in_ms is not None else 0
+        end_ms = self.trim_out_ms
+        job = _GifExportWorker(self._current_path, dest_path, start_ms=start_ms, end_ms=end_ms)
+        if not self._start_job(job, self._on_gif_success, self._on_gif_failed):
+            return None
+        self.btn_gif.setEnabled(False)
+        self.btn_gif.setText("⏳ GIF...")
+        return dest_path
+
+    def _on_gif_success(self, new_path: Path) -> None:
+        self.btn_gif.setEnabled(True)
+        self.btn_gif.setText("🎞️ GIF")
+        self.gifCompleted.emit(new_path)
+
+    def _on_gif_failed(self, error: str) -> None:
+        self.btn_gif.setEnabled(True)
+        self.btn_gif.setText("🎞️ GIF")
+        QMessageBox.warning(self, "GIF Export Error", error)
 
     def open_resize_dialog(self) -> Optional[Path]:
         """Open the interactive CapCut-style video resize/reframe dialog and start export if accepted."""

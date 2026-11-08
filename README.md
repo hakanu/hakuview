@@ -71,6 +71,12 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   Add single- or multi-line captions to both **images** and **videos** with a live preview, quick style presets (Reels Dark Pill, Light Pill, Yellow Highlight, Snapchat Full-Width Banner, Classic Impact Meme Outline, Cinema Subtitle), custom fonts & sizes, custom text/box colors & opacity, and flexible placement. Apply non-destructively to images (`Ctrl+Z` undo) or export captioned videos (`<name>_caption.mp4`, optionally scoped to marked In/Out trim points).
 - ✏️ **Quick Draw & Annotate (`D`)**  
   Press `D` to reveal the annotation bar above the canvas with **✒ Pen**, **🖍 Neon Highlighter**, **↗ Pointer Arrow**, **▭ Rounded Box**, **◯ Circle / Ellipse**, and **╱ Line**, 1-click color swatches, and thickness slider. Undo individual strokes with `Ctrl+Z`, then press `Enter` to bake onto the image undo stack.
+- 🎨 **Eyedropper / Pixel Color Picker (`P` or `Alt+Click`)**  
+  Press `P` (or hold `Alt` and click any pixel on the canvas) to sample the exact pixel color with a live floating `#HEX` + `RGB(r, g, b)` loupe, automatically copying the `#HEX` code to your clipboard and syncing it into the Draw & Annotate tool.
+- ✨ **1-Click Image Filters (`Shift+A` / `Shift+S` / `Shift+G` / `Shift+N`)**  
+  Instant non-destructive filters under `Edit ▾ → ✨ Quick Filters`: **⚡ Auto-Levels (Histogram Stretch)** (`Shift+A`), **🔍 Sharpen (Unsharp Mask)** (`Shift+S`), **⚫ Grayscale** (`Shift+G`), **🌗 Invert Colors** (`Shift+N`), and **📜 Vintage Sepia** — all backed by the 10-step `Ctrl+Z` undo stack.
+- 🔒 **1-Click EXIF / GPS Metadata Stripper (`Edit ▾ → Strip EXIF / GPS Metadata`)**  
+  Save a privacy-clean copy (`<name>_clean.<ext>`) with all camera EXIF, GPS coordinates, XMP, and comment tags removed while preserving original image quality.
 - 📐 **Image Resize, Resample & Reframe (`Ctrl+R`)**  
   Press `Ctrl+R` on any image to resize by **Pixels (`W × H`)** or **Percentage (`25%` – `200%`)** with aspect-ratio lock, **Smooth Lanczos** vs **Crisp Nearest Neighbor (Pixel Art)** filtering, or CapCut-style **Blurred Dominant-Color Backdrop** reframing (`16:9`, `1:1`, `4:5`, `9:16`). Apply in-place (`Ctrl+Z` undoable) or save as a new copy.
 - 📌 **Floating Paste & Stamp / Image Mashup (`Ctrl+V` / `Ctrl+Shift+V`)**  
@@ -89,6 +95,10 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, then press `T` or click **✂ Trim**. Uses instant FFmpeg stream copy with zero re-encoding and zero quality loss.
 - 📱 **1-Click WhatsApp Web Video Export (`K` or `📱 WhatsApp`)**  
   Click **📱 WhatsApp** in the video bar (or press `K`) to export `<name>_whatsapp.mp4` with lowered H.264 + AAC bitrate (`yuv420p`, `+faststart`) guaranteed to stay under WhatsApp Web's limit.
+- 🎞️ **Video Clip → Animated GIF Export (`G` or `🎞️ GIF`)**  
+  Click **🎞️ GIF** in the video bar (or press `G`) to convert the video (or your marked `[In, Out]` trim range) into a crisp, palette-optimized animated GIF (`<name>_clip.gif`) using FFmpeg 2-pass `palettegen` + `paletteuse`.
+- 🗑️ **Quick Move to Trash (`Shift+Del`)**  
+  While culling a folder (`←` / `→`), press `Shift+Delete` to move the current photo or video safely to the OS Trash / Recycle Bin and automatically advance to the next file.
 - 📐 **CapCut-Style Video Reframe & Resize (`📐 Resize`)**  
   Convert vertical videos to landscape (16:9 1080p/720p, 9:16, 1:1, 4:5, 21:9, or custom W×H) with a live preview and automatic dominant-color Gaussian-blurred backdrop, living 4-corner ambient glow, solid dominant fill, or center crop.
 - 🎨 **Color Scaling: Brightness & Contrast (`B`)**  
@@ -109,6 +119,10 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `C` | **Border Crop** (drag borders inward, then press `C` or `Enter` to commit) |
 | `Del` / `Backspace` or `X` | **Delete / Erase / Blur Region** (Blur, Pixelate, Smart Heal/Delogo, or Blackout a face/object on images & videos) |
 | `D` | **Quick Draw & Annotate** (Pen, Highlighter, Arrow, Box, Circle, Line + color swatches) |
+| `P` or `Alt + Click` | **Eyedropper / Pixel Color Picker** (sample pixel color, copy `#HEX` to clipboard & sync to Draw bar) |
+| `Shift + A / S / G / N` | **Quick Image Filters** (Auto-Levels, Sharpen, Grayscale, Invert Colors) |
+| `G` | **Video → Animated GIF** (exports marked `[In, Out]` clip as a palette-optimized `.gif`) |
+| `Shift + Del` | **Move File to Trash / Recycle Bin** and advance to the next file |
 | `Ctrl + R` | **Resize / Resample Image** (by pixels, percentage, or CapCut blurred backdrop) or Reframe Video |
 | `B` | **Color Scaling** (Live brightness & contrast sliders for images and videos) |
 | `A` or `Shift + T` | **Add Caption / Text** (Fonts, sizes, pill/banner/outline backgrounds for images & videos) |
@@ -155,6 +169,9 @@ Why use **HakuView** instead of traditional viewers (**IrfanView**, **XnView MP*
 | **1-Click WhatsApp Web Video Fix (`< 16 MB`)** | ✅ **Yes (`K`)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ Manual export settings |
 | **Geeky Codec / BPP / EXIF Inspector (`I`)** | ✅ **Yes** | ✅ Yes (`I`) | ✅ Yes | ❌ No | ❌ No | ❌ Basic info |
 | **Freehand Pen / Arrow / Shape Drawing** | ✅ **Yes (`D` — Pen, Marker, Arrow, Box, Circle)** | ⚠️ Paint plugin | ⚠️ Basic draw | ✅ **Yes (Full paint)** | ✅ **Yes (Full paint)** | ⚠️ Stickers / Draw |
+| **Eyedropper Color Picker (`#HEX` Copy)** | ✅ **Yes (`P` / `Alt+Click` + Loupe)** | ⚠️ Info dialog | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Inside text tool |
+| **Video Clip → Animated GIF Export (`G`)** | ✅ **Yes (2-Pass Palette GIF)** | ❌ No | ❌ No | ❌ No | ❌ No | ✅ Yes |
+| **1-Click EXIF / GPS Privacy Stripper** | ✅ **Yes (`_clean` copy)** | ⚠️ Save options | ✅ Yes | ❌ Strips on save | ❌ Strips on save | ❌ No |
 | **Image Pixel / % Resize (`Ctrl+R` Resample)** | ✅ **Yes (`Ctrl+R` + Blurred Pad)** | ✅ **Yes (`Ctrl+R`)** | ✅ **Yes** | ✅ **Yes** | ✅ **Yes** | ✅ Yes |
 | **Batch Convert / Batch Rename (100s of files)** | ❌ *Single-file focus* | ✅ **Yes (`B`)** | ✅ **Yes** | ❌ No | ❌ No | ❌ No |
 | **Folder Thumbnail Grid / Contact Sheet** | ❌ *Fast 1-by-1 viewer* | ✅ **Yes (`T`)** | ✅ **Yes** | ❌ No | ❌ No | ✅ Media bin |

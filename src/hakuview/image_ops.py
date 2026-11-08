@@ -507,6 +507,80 @@ def _qimage_to_pil(image: QImage) -> Image.Image:
     return pil_img
 
 
+def _pil_to_qimage(pil_img: Image.Image) -> QImage:
+    """Convert a Pillow Image into a detached ARGB32 QImage."""
+    rgba = pil_img.convert("RGBA")
+    w, h = rgba.size
+    raw = rgba.tobytes("raw", "RGBA")
+    qimg = QImage(raw, w, h, w * 4, QImage.Format.Format_RGBA8888)
+    return qimg.copy().convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def apply_quick_filter(image: QImage, filter_name: str) -> QImage:
+    """Apply a 1-click non-destructive filter ('grayscale', 'invert', 'sharpen', 'auto_levels', 'sepia')."""
+    if image is None or image.isNull():
+        return image
+    kind = filter_name.strip().lower()
+    pil_rgba = _qimage_to_pil(image)
+    r, g, b, a = pil_rgba.split()
+    rgb = Image.merge("RGB", (r, g, b))
+
+    if kind == "grayscale":
+        gray = ImageOps.grayscale(rgb)
+        out_rgb = Image.merge("RGB", (gray, gray, gray))
+    elif kind == "invert":
+        out_rgb = ImageOps.invert(rgb)
+    elif kind == "sharpen":
+        out_rgb = rgb.filter(ImageFilter.UnsharpMask(radius=1.6, percent=145, threshold=2))
+    elif kind == "auto_levels":
+        out_rgb = ImageOps.autocontrast(rgb, cutoff=1)
+    elif kind == "sepia":
+        gray = ImageOps.grayscale(rgb)
+        sepia_lut: List[int] = []
+        r_lut = [min(255, int(v * 1.08 + 22)) for v in range(256)]
+        g_lut = [min(255, int(v * 0.92 + 10)) for v in range(256)]
+        b_lut = [min(255, int(v * 0.74)) for v in range(256)]
+        sepia_lut.extend(r_lut + g_lut + b_lut)
+        out_rgb = Image.merge("RGB", (gray, gray, gray)).point(sepia_lut)
+    else:
+        return image.copy()
+
+    nr, ng, nb = out_rgb.split()
+    return _pil_to_qimage(Image.merge("RGBA", (nr, ng, nb, a)))
+
+
+def strip_image_metadata(doc: "ImageDocument", in_place: bool = False) -> Tuple[Path, int]:
+    """Save a clean copy of `doc.current` with all EXIF, GPS, XMP & comment metadata stripped.
+
+    Returns `(output_path, stripped_tag_count)`.
+    """
+    src_path = doc.path
+    tag_count = 0
+    try:
+        with Image.open(src_path) as im:
+            exif = im.getexif()
+            tag_count += len(exif)
+            # Count GPS or IFD sub-blocks if present
+            for ifd_id in (0x8769, 0x8825, 0xA005):
+                try:
+                    tag_count += len(exif.get_ifd(ifd_id))
+                except Exception:
+                    pass
+            for k in im.info:
+                if k.lower() in ("exif", "xmp", "xml:com.adobe.xmp", "comment", "icc_profile"):
+                    tag_count += 1
+    except Exception:
+        pass
+
+    ext = src_path.suffix or ".png"
+    target = src_path if in_place else _next_variant_path(src_path, "clean", ext)
+    if ext.lower() in (".jpg", ".jpeg") and src_path.exists():
+        save_jpeg_matching_source(doc.current, src_path, target)
+    else:
+        save_qimage_atomic(doc.current, target)
+    return target, tag_count
+
+
 def color_lut_params(brightness: int, contrast: int) -> Tuple[float, float]:
     """(contrast factor, brightness offset) for: out = clip(round(factor * (x - 128 + offset) + 128))."""
     c = max(-99, min(99, int(contrast))) * 2.55
@@ -829,6 +903,14 @@ class ImageDocument:
             return False
         self._push_undo("annotate")
         self.current = apply_draw_strokes(self.current, strokes)
+        return True
+
+    def apply_filter(self, filter_name: str) -> bool:
+        """Apply a 1-click filter ('grayscale', 'invert', 'sharpen', 'auto_levels', 'sepia') onto the undo stack."""
+        if self.current.isNull():
+            return False
+        self._push_undo(f"filter:{filter_name}")
+        self.current = apply_quick_filter(self.current, filter_name)
         return True
 
     def undo(self) -> bool:

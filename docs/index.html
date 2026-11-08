@@ -498,7 +498,7 @@
     <div class="container nav">
       <a href="#" class="brand">
         <span>🦉 HakuView</span>
-        <span class="brand-badge">v0.7.3 • PySide6 + FFmpeg</span>
+        <span class="brand-badge">v0.8.0 • PySide6 + FFmpeg</span>
       </a>
       <nav class="nav-links">
         <a href="#demo">Live Demo</a>
@@ -659,12 +659,20 @@
           <p>Draw pointer arrows, rounded callout boxes, circles, freehand pen strokes, and neon highlighter marks with 1-click color swatches and <kbd>Ctrl+Z</kbd> stroke undo.</p>
         </div>
         <div class="mini-card">
+          <h4>🎨 Eyedropper Color Picker (<kbd>P</kbd> / <kbd>Alt+Click</kbd>)</h4>
+          <p>Hover with a live <kbd>#HEX</kbd> + <kbd>RGB</kbd> loupe and click any pixel to copy its hex color to the clipboard and sync it into the Draw tool.</p>
+        </div>
+        <div class="mini-card">
+          <h4>🎞️ Video Clip → Animated GIF (<kbd>G</kbd>)</h4>
+          <p>Export any video (or marked <kbd>[In, Out]</kbd> trim range) as a crisp 2-pass palette-optimized animated GIF (<kbd>palettegen</kbd> + <kbd>paletteuse</kbd>).</p>
+        </div>
+        <div class="mini-card">
           <h4>📐 Image Resize &amp; Resample (<kbd>Ctrl+R</kbd>)</h4>
           <p>Resize images by exact pixels (<kbd>W × H</kbd>), percentage (<kbd>25%</kbd>–<kbd>200%</kbd>), or CapCut-style blurred dominant-color backdrop with Smooth Lanczos or Pixel-Art Nearest Neighbor.</p>
         </div>
         <div class="mini-card">
-          <h4>📱 WhatsApp Web Video Fix (<kbd>K</kbd>)</h4>
-          <p>Press <kbd>K</kbd> to transcode any stubborn MKV/HEVC/WebM clip into strict WhatsApp-compatible MP4 with automatic bitrate targeting.</p>
+          <h4>✨ 1-Click Filters &amp; 🔒 EXIF Stripper</h4>
+          <p>Apply Auto-Levels (<kbd>Shift+A</kbd>), Sharpen (<kbd>Shift+S</kbd>), Grayscale (<kbd>Shift+G</kbd>), Invert (<kbd>Shift+N</kbd>), or Sepia, or save a privacy-clean copy with all EXIF/GPS tags stripped.</p>
         </div>
         <div class="mini-card">
           <h4>🖥️ Native Linux, macOS &amp; Windows App</h4>
@@ -812,6 +820,33 @@
               <td>⚠️ Stickers / Draw</td>
             </tr>
             <tr>
+              <td><strong>Eyedropper Color Picker (<kbd>#HEX</kbd> Copy)</strong></td>
+              <td>✅ <strong>Yes (<kbd>P</kbd> / <kbd>Alt+Click</kbd> + Loupe)</strong></td>
+              <td>⚠️ Info dialog</td>
+              <td>✅ Yes</td>
+              <td>✅ Yes</td>
+              <td>✅ Yes</td>
+              <td>⚠️ Text tool only</td>
+            </tr>
+            <tr>
+              <td><strong>Video Clip → Animated GIF Export (<kbd>G</kbd>)</strong></td>
+              <td>✅ <strong>Yes (2-Pass Palette GIF)</strong></td>
+              <td>❌ No</td>
+              <td>❌ No</td>
+              <td>❌ No</td>
+              <td>❌ No</td>
+              <td>✅ Yes</td>
+            </tr>
+            <tr>
+              <td><strong>1-Click EXIF / GPS Privacy Stripper</strong></td>
+              <td>✅ <strong>Yes (<code>_clean</code> copy)</strong></td>
+              <td>⚠️ Save options</td>
+              <td>✅ Yes</td>
+              <td>❌ Strips on save</td>
+              <td>❌ Strips on save</td>
+              <td>❌ No</td>
+            </tr>
+            <tr>
               <td><strong>Image Pixel / % Resize (Resample)</strong></td>
               <td>✅ <strong>Yes (<kbd>Ctrl+R</kbd> + Blurred Pad)</strong></td>
               <td>✅ <strong>Yes (Ctrl+R)</strong></td>
@@ -891,6 +926,22 @@
             <tr>
               <td><kbd>D</kbd></td>
               <td>Quick Draw &amp; Annotate (Pen, Neon Highlighter, Arrow, Box, Circle, Line)</td>
+            </tr>
+            <tr>
+              <td><kbd>P</kbd> or <kbd>Alt+Click</kbd></td>
+              <td>Eyedropper / Pixel Color Picker (sample pixel, copy <kbd>#HEX</kbd> &amp; sync to Draw bar)</td>
+            </tr>
+            <tr>
+              <td><kbd>Shift+A</kbd> / <kbd>S</kbd> / <kbd>G</kbd> / <kbd>N</kbd></td>
+              <td>Quick Image Filters (Auto-Levels, Sharpen, Grayscale, Invert Colors)</td>
+            </tr>
+            <tr>
+              <td><kbd>G</kbd></td>
+              <td>Export Video Clip (or <kbd>[In, Out]</kbd> trim range) as a 2-pass Palette Animated GIF</td>
+            </tr>
+            <tr>
+              <td><kbd>Shift+Del</kbd></td>
+              <td>Move Current File to OS Trash / Recycle Bin and advance to next file</td>
             </tr>
             <tr>
               <td><kbd>Ctrl+R</kbd></td>

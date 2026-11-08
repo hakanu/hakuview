@@ -33,6 +33,7 @@ class ImageCanvas(QWidget):
     selectionChanged = Signal(QRect)  # Emitted in image pixel coordinates
     overlayChanged = Signal(bool)  # True when a floating paste overlay is active
     drawModeChanged = Signal(bool)  # True when quick draw & annotate mode is active
+    colorPicked = Signal(str, QColor, QPoint)  # (#RRGGBB, QColor, image_pt) when eyedropper samples a pixel
     doubleClicked = Signal()
     wheelNavigate = Signal(int)  # +1 = next file, -1 = previous (when the wheel is set to navigate)
 
@@ -66,6 +67,10 @@ class ImageCanvas(QWidget):
         self._draw_size: int = 6
         self._draw_strokes: list[DrawStroke] = []
         self._active_stroke: Optional[DrawStroke] = None
+
+        # Eyedropper / pixel color picker mode (P or Alt+Click)
+        self._eyedropper_mode: bool = False
+        self._hover_widget_pos: Optional[QPointF] = None
 
         self._drag_mode: Optional[str] = None  # 'new', 'move', 'n','s','e','w','ne','nw','se','sw', 'pan', 'draw'
         self._drag_start_widget: QPointF = QPointF()
@@ -101,6 +106,7 @@ class ImageCanvas(QWidget):
         if reset_view:
             self.clear_overlay()
             self.stop_draw_mode()
+            self.set_eyedropper_mode(False)
 
         if movie_path is not None and movie_path.suffix.lower() in (".gif", ".webp"):
             movie = QMovie(str(movie_path))
@@ -475,6 +481,10 @@ class ImageCanvas(QWidget):
         if self._show_info_overlay and self._info_text:
             self._draw_info_hud(painter)
 
+        # Live eyedropper color swatch & hex loupe when in eyedropper mode ('P' key)
+        if self._eyedropper_mode and self._hover_widget_pos is not None:
+            self._draw_eyedropper_loupe(painter, self._hover_widget_pos)
+
     def set_message(self, message: Optional[str]) -> None:
         """Text to show when there is no image (e.g. why a file failed to load); None = default hint."""
         self._message = message
@@ -653,6 +663,69 @@ class ImageCanvas(QWidget):
             self._info_text,
         )
 
+    @property
+    def eyedropper_mode(self) -> bool:
+        return self._eyedropper_mode
+
+    def set_eyedropper_mode(self, enabled: bool) -> None:
+        if self._eyedropper_mode == enabled:
+            return
+        self._eyedropper_mode = enabled
+        if enabled:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self._hover_widget_pos = None
+        self.update()
+
+    def pick_color_at_image_point(self, img_pt: QPoint) -> Optional[tuple[str, QColor, QPoint]]:
+        """Sample pixel at `img_pt`, emit `colorPicked`, and return `(hex_upper, QColor, clamped_pt)`."""
+        if self._image is None or self._image.isNull():
+            return None
+        ix = max(0, min(self._image.width() - 1, img_pt.x()))
+        iy = max(0, min(self._image.height() - 1, img_pt.y()))
+        clamped = QPoint(ix, iy)
+        color = self._image.pixelColor(ix, iy)
+        hex_code = color.name().upper()
+        self.set_eyedropper_mode(False)
+        self.colorPicked.emit(hex_code, color, clamped)
+        return hex_code, color, clamped
+
+    def _draw_eyedropper_loupe(self, painter: QPainter, pos: QPointF) -> None:
+        if self._image is None or self._image.isNull():
+            return
+        pt = self.widget_to_image(pos, clamp=True)
+        ix = max(0, min(self._image.width() - 1, pt.x()))
+        iy = max(0, min(self._image.height() - 1, pt.y()))
+        c = self._image.pixelColor(ix, iy)
+        hex_code = c.name().upper()
+        label = f"{hex_code}  •  rgb({c.red()}, {c.green()}, {c.blue()})  [{ix}, {iy}]"
+
+        font = QFont("Monospace", 9)
+        font.setBold(True)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(label) + 46
+        th = max(28, fm.height() + 12)
+        bx = min(self.width() - tw - 10.0, max(10.0, pos.x() + 16.0))
+        by = max(10.0, pos.y() - th - 12.0)
+
+        pill = QRectF(bx, by, tw, th)
+        painter.setBrush(QColor(15, 23, 42, 238))
+        painter.setPen(QPen(QColor(56, 189, 248, 210), 1.5))
+        painter.drawRoundedRect(pill, 7, 7)
+
+        swatch = QRectF(bx + 8, by + (th - 16) / 2.0, 16, 16)
+        painter.setBrush(c)
+        painter.setPen(QPen(QColor(248, 250, 252, 220), 1.2))
+        painter.drawRoundedRect(swatch, 4, 4)
+
+        painter.setPen(QColor(241, 245, 249))
+        painter.drawText(
+            QRectF(bx + 30, by, tw - 36, th),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            label,
+        )
+
     # ------------------------------------------------------------------
     # Mouse & Wheel interaction (Crop selection + Pan + Zoom)
     # ------------------------------------------------------------------
@@ -749,6 +822,11 @@ class ImageCanvas(QWidget):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._eyedropper_mode or bool(event.modifiers() & Qt.KeyboardModifier.AltModifier):
+                img_pt = self.widget_to_image(pos, clamp=True)
+                self.pick_color_at_image_point(img_pt)
+                return
+
             if self._draw_mode:
                 self._drag_mode = "draw"
                 img_pt = self.widget_to_image(pos, clamp=True)
@@ -784,6 +862,9 @@ class ImageCanvas(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
+        if self._eyedropper_mode:
+            self._hover_widget_pos = pos
+            self.update()
 
         if self._drag_mode is None:
             self._update_hover_cursor(pos)
