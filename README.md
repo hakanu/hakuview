@@ -35,7 +35,9 @@ Install globally with desktop shortcuts and right-click **"Open with HakuView"**
 uv tool install git+https://github.com/hakanu/hakuview.git && hakuview --install-desktop
 ```
 
-On Windows this adds HakuView, with its icon, to Explorer's right-click menu and to the **"Open with" / "How do you want to open this file?"** list. If you set it up with an older version and the icon is missing, run `hakuview --install-desktop` again.
+- **Linux:** Creates `~/.local/share/applications/hakuview.desktop` and registers HakuView in your application launcher and file manager's **"Open With"** menu.
+- **macOS (Apple Silicon & Intel):** Creates `~/Applications/HakuView.app` (`Info.plist` + `.icns` icon) and registers it with LaunchServices so HakuView appears in Spotlight, Launchpad, and Finder's **"Open With"** menu. *(For video trimming/reframing on macOS, ensure FFmpeg is installed via `brew install ffmpeg`.)*
+- **Windows:** Adds HakuView with its `.ico` icon to the Start Menu, Explorer's right-click menu, and the **"Open with" / "How do you want to open this file?"** list.
 
 > **Or run instantly without installing:**
 > ```bash

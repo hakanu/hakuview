@@ -2528,6 +2528,31 @@ def test_quick_draw_and_annotate_tools_undo_and_apply(tmp_path: Path, qtbot) -> 
     assert win.document.current == base
 
 
+def test_macos_app_bundle_install_and_uninstall(tmp_path: Path, monkeypatch) -> None:
+    import plistlib
+    import sys
+    from hakuview import installer
+
+    monkeypatch.setattr(installer, "sys", type("S", (), {"platform": "darwin", "executable": sys.executable}))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    msg = installer.install_desktop_integration()
+    app_bundle = tmp_path / "Applications" / "HakuView.app"
+    assert str(app_bundle) in msg
+    assert (app_bundle / "Contents" / "MacOS" / "HakuView").exists()
+    assert (app_bundle / "Contents" / "Info.plist").exists()
+    with (app_bundle / "Contents" / "Info.plist").open("rb") as fp:
+        pl = plistlib.load(fp)
+    assert pl["CFBundleName"] == "HakuView"
+    assert "jpg" in pl["CFBundleDocumentTypes"][0]["CFBundleTypeExtensions"]
+    assert "mp4" in pl["CFBundleDocumentTypes"][0]["CFBundleTypeExtensions"]
+
+    un_msg = installer.uninstall_desktop_integration()
+    assert "Removed macOS application bundle" in un_msg
+    assert not app_bundle.exists()
+
+
+
 
 
 

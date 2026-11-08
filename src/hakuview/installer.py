@@ -50,9 +50,11 @@ def _resolve_executable_command() -> str:
 
 
 def install_desktop_integration() -> str:
-    """Install OS desktop launcher & 'Open With HakuView' association on Ubuntu/Linux or Windows."""
+    """Install OS desktop launcher & 'Open With HakuView' association on Linux, macOS, or Windows."""
     if sys.platform.startswith("win"):
         return _install_windows_integration()
+    if sys.platform == "darwin":
+        return _install_macos_integration()
     return _install_linux_integration()
 
 
@@ -60,7 +62,88 @@ def uninstall_desktop_integration() -> str:
     """Remove OS desktop launcher & context menu associations."""
     if sys.platform.startswith("win"):
         return _uninstall_windows_integration()
+    if sys.platform == "darwin":
+        return _uninstall_macos_integration()
     return _uninstall_linux_integration()
+
+
+def _install_macos_integration() -> str:
+    """Create ~/Applications/HakuView.app bundle and register file associations with LaunchServices."""
+    import plistlib
+
+    app_dir = Path.home() / "Applications" / "HakuView.app"
+    contents_dir = app_dir / "Contents"
+    macos_dir = contents_dir / "MacOS"
+    res_dir = contents_dir / "Resources"
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    res_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Generate hakuview.icns (or PNG fallback) via Pillow
+    icns_path = res_dir / "hakuview.icns"
+    try:
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGBA", (256, 256), (15, 23, 42, 255))
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle([16, 26, 240, 230], radius=28, fill=(30, 41, 59), outline=(56, 189, 248), width=10)
+        draw.ellipse([64, 74, 116, 126], fill=(250, 204, 21))
+        draw.polygon([(36, 204), (104, 124), (148, 168), (188, 128), (220, 204)], fill=(56, 189, 248))
+        img.save(str(icns_path), format="ICNS")
+    except Exception:
+        pass
+
+    # 2. Launcher executable script inside Contents/MacOS/HakuView
+    exec_cmd = _resolve_executable_command()
+    launcher = macos_dir / "HakuView"
+    launcher.write_text(
+        "#!/bin/sh\n"
+        'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"\n'
+        f"exec {exec_cmd} \"$@\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+
+    # 3. Info.plist with CFBundleDocumentTypes for all supported image & video extensions
+    exts = [ext.lstrip(".") for ext in sorted(SUPPORTED_EXTENSIONS)]
+    plist_data = {
+        "CFBundleName": "HakuView",
+        "CFBundleDisplayName": "HakuView",
+        "CFBundleIdentifier": "net.hakanu.hakuview",
+        "CFBundleVersion": "1.0",
+        "CFBundlePackageType": "APPL",
+        "CFBundleExecutable": "HakuView",
+        "CFBundleIconFile": "hakuview.icns",
+        "NSHighResolutionCapable": True,
+        "CFBundleDocumentTypes": [
+            {
+                "CFBundleTypeName": "Media File",
+                "CFBundleTypeRole": "Viewer",
+                "LSHandlerRank": "Alternate",
+                "CFBundleTypeExtensions": exts,
+                "CFBundleTypeMIMETypes": MIME_TYPES,
+            }
+        ],
+    }
+    info_plist = contents_dir / "Info.plist"
+    with info_plist.open("wb") as fp:
+        plistlib.dump(plist_data, fp)
+
+    # 4. Register with macOS LaunchServices so Finder's 'Open With' & Spotlight pick it up immediately
+    lsregister = (
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    )
+    if Path(lsregister).exists():
+        subprocess.run([lsregister, "-f", str(app_dir)], check=False, capture_output=True)
+
+    return f"Installed macOS application bundle: {app_dir}"
+
+
+def _uninstall_macos_integration() -> str:
+    app_dir = Path.home() / "Applications" / "HakuView.app"
+    if app_dir.exists():
+        shutil.rmtree(app_dir)
+        return f"Removed macOS application bundle: {app_dir}"
+    return "No macOS HakuView.app bundle found."
 
 
 def _install_linux_integration() -> str:
