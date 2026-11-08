@@ -294,12 +294,14 @@ class HakuViewWindow(QMainWindow):
         # window is narrow) + the ⋯ button in a fixed slot on the right, so it is always reachable.
         self.top_bar = QWidget(self)
         self.top_bar.setObjectName("topBar")
+        self.top_bar.setMinimumWidth(0)
         top_layout = QHBoxLayout(self.top_bar)
         top_layout.setContentsMargins(0, 0, 6, 0)
         top_layout.setSpacing(0)
         self.toolbar = QToolBar("Main Toolbar", self.top_bar)
         self.toolbar.setMovable(False)
         self.toolbar.setFloatable(False)
+        self.toolbar.setMinimumWidth(0)
         top_layout.addWidget(self.toolbar, stretch=1)
         self.setMenuWidget(self.top_bar)
 
@@ -334,6 +336,49 @@ class HakuViewWindow(QMainWindow):
             "A",
         )
         self.btn_caption.setEnabled(False)
+        self.btn_draw = self._add_tb_button(
+            "✏️ Draw",
+            self.toggle_draw_bar,
+            "Draw & Annotate: Pen, Highlighter, Arrow, Box, Circle & Line",
+            "D",
+            checkable=True,
+        )
+        self.btn_draw.setEnabled(False)
+        self.btn_erase = self._add_tb_button(
+            "🧹 Erase",
+            self.open_erase_region_dialog,
+            "Erase, blur, pixelate or smart-heal a region on image or video",
+            "X",
+        )
+        self.btn_erase.setEnabled(False)
+        self.btn_resize = self._add_tb_button(
+            "📐 Resize",
+            self.open_resize_dialog,
+            "Resize / resample image by pixels or %, or CapCut-style video reframe",
+            "Ctrl+R",
+        )
+        self.btn_resize.setEnabled(False)
+        self.btn_paste = self._add_tb_button(
+            "📋 Paste",
+            self.paste_image_overlay,
+            "Paste image from clipboard as a movable/resizable floating overlay",
+            "Ctrl+V",
+        )
+        self.btn_paste.setEnabled(False)
+        self.btn_rot_left = self._add_tb_button(
+            "↺",
+            self.rotate_left,
+            "Rotate 90° Counter-Clockwise",
+            "L",
+        )
+        self.btn_rot_left.setEnabled(False)
+        self.btn_rot_right = self._add_tb_button(
+            "↻",
+            self.rotate_right,
+            "Rotate 90° Clockwise",
+            "R",
+        )
+        self.btn_rot_right.setEnabled(False)
         self.btn_crop = self._add_tb_button(
             "✂ Crop",
             self.trigger_crop_action,
@@ -391,6 +436,20 @@ class HakuViewWindow(QMainWindow):
             "▶ Slideshow", "Start/stop the slideshow  (W / F5) — arrow: interval & shuffle",
             self.slideshow_menu, "slideshowButton", slot=self.toggle_slideshow, checkable=True,
         )
+        self.btn_random = self._add_tb_button(
+            "🎲 Random",
+            self.random_item,
+            "Jump to a random file in the current folder",
+            "Ctrl+M",
+        )
+        self.btn_random.setEnabled(False)
+        self.btn_goto = self._add_tb_button(
+            "🔎 Go To",
+            self.show_goto_dialog,
+            "Go to file by index number or name",
+            "Ctrl+G",
+        )
+        self.btn_goto.setEnabled(False)
         self.toolbar.addSeparator()
 
         self.btn_fit = self._add_tb_button("Fit", self.canvas.zoom_fit, "Fit image to window", "0")
@@ -400,6 +459,46 @@ class HakuViewWindow(QMainWindow):
             "Info", self.show_media_info_dialog, "Media Inspector: compression ratio, bitrate, codec, EXIF & tech specs", "I / Ctrl+I"
         )
         self.btn_info.setEnabled(False)
+        self.btn_settings = self._add_tb_button(
+            "⚙",
+            self.show_settings_dialog,
+            "Settings: theme, mouse wheel, sorting & defaults",
+            "Ctrl+,",
+        )
+
+        # Responsive toolbar priority lists:
+        # `_anchor_tb_buttons` stay visible even on compact windows;
+        # `_responsive_tb_buttons` are shown progressively as window width increases and fold into `⋯` when narrow.
+        self._anchor_tb_buttons = [
+            self.btn_open,
+            self.btn_prev,
+            self.btn_next,
+            self.btn_edit,
+            self.btn_crop,
+            self.btn_save,
+        ]
+        self._responsive_tb_buttons = [
+            # Tier 1: Default window buttons (fit comfortably at 1180px)
+            self.btn_undo,
+            self.btn_caption,
+            self.btn_color,
+            self.btn_compress,
+            self.btn_slideshow,
+            self.btn_fit,
+            self.btn_actual,
+            self.btn_fullscreen,
+            self.btn_info,
+            # Tier 2: Wide-screen buttons promoted from the ⋯ / Edit menus
+            self.btn_draw,
+            self.btn_erase,
+            self.btn_resize,
+            self.btn_paste,
+            self.btn_rot_left,
+            self.btn_rot_right,
+            self.btn_random,
+            self.btn_goto,
+            self.btn_settings,
+        ]
 
         # Spacer & 3-dots More Options button
         self.btn_more = QPushButton(self.top_bar)
@@ -447,6 +546,26 @@ class HakuViewWindow(QMainWindow):
         self.status.addPermanentWidget(self.lbl_modified)
         self.status.addPermanentWidget(self.lbl_dimensions)
         self.status.addPermanentWidget(self.lbl_zoom)
+        self._relayout_responsive_toolbar()
+
+    def _relayout_responsive_toolbar(self) -> None:
+        """Progressively show or hide toolbar buttons based on window width so wide screens
+        expose extra tools from the ⋯ menu and narrower screens fold buttons cleanly into ⋯."""
+        if not hasattr(self, "_responsive_tb_buttons"):
+            return
+        anchor_w = sum(max(44, b.sizeHint().width()) + 6 for b in self._anchor_tb_buttons) + 76
+        avail = max(0, self.width() - anchor_w)
+        used = 0
+        for btn in self._responsive_tb_buttons:
+            act = getattr(btn, "_tb_action", None)
+            if act is None:
+                continue
+            bw = max(44, btn.sizeHint().width()) + 6
+            if used + bw <= avail:
+                act.setVisible(True)
+                used += bw
+            else:
+                act.setVisible(False)
 
     def toggle_color_bar(self) -> None:
         """Toggle visibility of the brightness/contrast bar."""
@@ -569,7 +688,7 @@ class HakuViewWindow(QMainWindow):
         else:
             btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
             btn.clicked.connect(lambda _checked=False: slot())
-        self.toolbar.addWidget(btn)
+        btn._tb_action = self.toolbar.addWidget(btn)
         return btn
 
     def set_compression_mode(self, mode: str) -> None:
@@ -594,7 +713,7 @@ class HakuViewWindow(QMainWindow):
         btn.setToolTip(f"{tooltip}  ({shortcut})" if shortcut else tooltip)
         btn.setCheckable(checkable)
         btn.clicked.connect(lambda _checked=False: slot())
-        self.toolbar.addWidget(btn)
+        btn._tb_action = self.toolbar.addWidget(btn)
         return btn
 
     def _build_shortcuts(self) -> None:
@@ -1120,6 +1239,8 @@ class HakuViewWindow(QMainWindow):
 
     def _on_draw_mode_changed(self, active: bool) -> None:
         self.draw_bar.setVisible(active)
+        if hasattr(self, "btn_draw"):
+            self.btn_draw.setChecked(active)
 
     def toggle_draw_bar(self) -> bool:
         """Toggle the Quick Draw & Annotate toolbar (D)."""
@@ -2069,6 +2190,14 @@ class HakuViewWindow(QMainWindow):
 
         self.btn_edit.setEnabled(is_img or is_vid)
         self.btn_caption.setEnabled(is_img or is_vid)
+        self.btn_draw.setEnabled(bool(is_img))
+        self.btn_erase.setEnabled(is_img or is_vid)
+        self.btn_resize.setEnabled(is_img or is_vid)
+        self.btn_paste.setEnabled(bool(is_img))
+        self.btn_rot_left.setEnabled(is_img or is_vid)
+        self.btn_rot_right.setEnabled(is_img or is_vid)
+        self.btn_random.setEnabled(self.navigator.count > 1)
+        self.btn_goto.setEnabled(self.navigator.count > 0)
         self.act_draw.setVisible(bool(is_img))
         self.act_resize_image.setVisible(bool(is_img))
         self.act_paste_overlay.setVisible(bool(is_img))
@@ -2156,6 +2285,7 @@ class HakuViewWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._relayout_responsive_toolbar()
         if self.isFullScreen():
             self.fs_overlay.place()
 

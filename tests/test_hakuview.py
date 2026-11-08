@@ -871,13 +871,42 @@ def test_color_bar_offers_video_export_only_for_videos(tmp_path: Path, qtbot, mo
 
 def test_more_button_stays_visible_when_toolbar_overflows(tmp_path: Path, qtbot) -> None:
     _create_sample_image(tmp_path / "img1.png")
+    _create_sample_image(tmp_path / "img2.png")
     win = HakuViewWindow(initial_path=tmp_path / "img1.png")
     qtbot.addWidget(win)
+
+    # 1. Narrow screen (700px): extra buttons fold into the 3-dots menu so the toolbar fits and ⋯ stays visible
     win.resize(700, 500)
     win.show()
     qtbot.waitExposed(win)
-    assert win.toolbar.sizeHint().width() > win.width()  # really overflowing
     assert win.btn_more.isVisible()
+    assert win.toolbar.sizeHint().width() <= win.width()
+    narrow_visible = [b for b in win._responsive_tb_buttons if b._tb_action.isVisible()]
+    assert not win.btn_draw._tb_action.isVisible()
+    assert not win.btn_random._tb_action.isVisible()
+    assert not win.btn_settings._tb_action.isVisible()
+
+    # Every folded button remains accessible inside the 3-dots menu
+    menu = win.show_more_options_menu(exec_menu=False)
+    menu_texts = [a.text() for a in _all_menu_actions(menu)]
+    assert any("Draw && Annotate" in t for t in menu_texts)
+    assert any("Random File" in t for t in menu_texts)
+    assert any("Settings" in t for t in menu_texts)
+
+    # 2. Wide screen (1920px): buttons from the 3-dots menu automatically appear on the top toolbar
+    win.resize(1920, 900)
+    win._relayout_responsive_toolbar()
+    wide_visible = [b for b in win._responsive_tb_buttons if b._tb_action.isVisible()]
+    assert len(wide_visible) > len(narrow_visible)
+    assert win.btn_draw._tb_action.isVisible()
+    assert win.btn_erase._tb_action.isVisible()
+    assert win.btn_resize._tb_action.isVisible()
+    assert win.btn_paste._tb_action.isVisible()
+    assert win.btn_rot_left._tb_action.isVisible()
+    assert win.btn_rot_right._tb_action.isVisible()
+    assert win.btn_random._tb_action.isVisible()
+    assert win.btn_goto._tb_action.isVisible()
+    assert win.btn_settings._tb_action.isVisible()
 
 
 def test_fullscreen_hides_bars_and_shows_controls(tmp_path: Path, qtbot) -> None:
