@@ -504,9 +504,9 @@ class ImageCanvas(QWidget):
         font.setPointSize(12)
         painter.setFont(font)
         msg = self._message or (
-            "Drop an image or video here, or press O to Open\n\n"
+            "Drop an image or video here, press O to Open, or Ctrl+V to Paste Clipboard Image\n\n"
             "← / → : Cycle folder   |   R / L : Rotate   |   Drag + C : Crop\n"
-            "W / F5 : Slideshow   |   Ctrl+M : Random File   |   F / F11 : Fullscreen"
+            "Ctrl+N : New Window   |   W / F5 : Slideshow   |   F / F11 : Fullscreen"
         )
         flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
         painter.drawText(self.rect().adjusted(40, 0, -40, 0), flags, msg)

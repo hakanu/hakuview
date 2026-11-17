@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime
 import importlib.util
 import io
 import math
@@ -16,7 +17,7 @@ import threading
 from typing import List, Optional, Tuple
 
 from PIL import Image, ImageFilter, ImageOps, JpegImagePlugin
-from PySide6.QtCore import QBuffer, QIODevice, QObject, QPointF, QRect, QRectF, QRunnable, QSize, QThreadPool, Qt, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QObject, QPointF, QRect, QRectF, QRunnable, QSize, QStandardPaths, QThreadPool, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
 from .formatting import human_size
@@ -633,6 +634,69 @@ def _next_variant_path(source_path: Path, tag: str, ext: str) -> Path:
     return candidate
 
 
+def resolve_screencap_folder(home: Optional[Path | str] = None) -> Path:
+    """Return the system's existing Screenshots folder if available, else create `$HOME/Pictures/Screencaps`."""
+    if home is not None:
+        base_home = Path(home)
+        pictures_candidates = [base_home / "Pictures"]
+    else:
+        base_home = Path.home()
+        pictures_candidates = []
+        std_pic = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        if std_pic:
+            pictures_candidates.append(Path(std_pic))
+        xdg_pic = os.environ.get("XDG_PICTURES_DIR", "").strip().strip('"')
+        if xdg_pic:
+            pictures_candidates.append(Path(xdg_pic.replace("$HOME", str(base_home))))
+        pictures_candidates.append(base_home / "Pictures")
+        onedrive = os.environ.get("OneDrive", "").strip()
+        if onedrive:
+            pictures_candidates.append(Path(onedrive) / "Pictures")
+
+    # 1. Use an existing default Screenshots folder if present
+    seen: set[Path] = set()
+    for pic_dir in pictures_candidates:
+        for sub in ("Screenshots", "Screenshot"):
+            cand = pic_dir / sub
+            if cand not in seen:
+                seen.add(cand)
+                if cand.is_dir():
+                    return cand
+    home_screenshots = base_home / "Screenshots"
+    if home_screenshots.is_dir():
+        return home_screenshots
+
+    # 2. Fallback: create $HOME/Pictures/Screencaps (or localized Pictures/Screencaps)
+    if (base_home / "Pictures").is_dir() or home is not None:
+        fallback = base_home / "Pictures" / "Screencaps"
+    elif pictures_candidates and pictures_candidates[0].is_dir():
+        fallback = pictures_candidates[0] / "Screencaps"
+    else:
+        fallback = base_home / "Pictures" / "Screencaps"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+def next_deduped_paste_path(
+    folder: Path | str,
+    ext: str = ".png",
+    *,
+    prefix: str = "pasted",
+    now: Optional[datetime] = None,
+) -> Path:
+    """Return a guaranteed non-existing file path `<folder>/<prefix>_YYYYMMDD_HHMMSS[_N].<ext>`."""
+    target_dir = Path(folder)
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    ts = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    candidate = target_dir / f"{prefix}_{ts}{ext}"
+    counter = 2
+    while candidate.exists():
+        candidate = target_dir / f"{prefix}_{ts}_{counter}{ext}"
+        counter += 1
+    return candidate
+
+
 class CompressionError(Exception):
     """A compression preset can't produce a useful variant; the message is user-facing."""
 
@@ -878,13 +942,14 @@ class ImageDocument:
 
     MAX_UNDO = 10
 
-    def __init__(self, path: Path, image: QImage) -> None:
+    def __init__(self, path: Path, image: QImage, *, unsaved_new: bool = False) -> None:
         self.path: Path = path
         self.original: QImage = image
         self.current: QImage = image
         self.undo_stack: List[QImage] = []
         self.ops: List[str] = []
-        self.modified: bool = False
+        self.unsaved_new: bool = unsaved_new
+        self.modified: bool = bool(unsaved_new)
         self.target_save_quality: int = -1
 
     def _push_undo(self, op: str) -> None:
@@ -1019,8 +1084,8 @@ class ImageDocument:
         self.current = self.undo_stack.pop()
         if self.ops:
             self.ops.pop()
-        self.modified = bool(self.undo_stack)
-        if not self.modified:
+        self.modified = bool(self.undo_stack) or self.unsaved_new
+        if not self.undo_stack:
             self.target_save_quality = -1
         return True
 
@@ -1030,6 +1095,7 @@ class ImageDocument:
         self.current = self.original
         self.undo_stack.clear()
         self.ops.clear()
+        self.unsaved_new = False
         self.modified = False
         self.target_save_quality = -1
         return True
@@ -1040,6 +1106,7 @@ class ImageDocument:
         self.original = self.current
         self.undo_stack.clear()
         self.ops.clear()
+        self.unsaved_new = False
         self.modified = False
         self.target_save_quality = -1
 

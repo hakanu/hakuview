@@ -115,6 +115,8 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | Key | Action |
 | :--- | :--- |
 | `←` / `→` | Previous / Next file in folder |
+| `Ctrl` / `Shift` / `Alt` + `←` / `→` | **VLC-Style Video Seek Jumps** (`Ctrl`: ±10s, `Shift`: ±5s, `Alt`: ±30s, `Ctrl+Shift`: ±60s) |
+| `Ctrl + N` | **New Empty Window** (then press `Ctrl+V` to paste a copied image and `Ctrl+S` to save with an auto-deduped filename) |
 | `Ctrl + M` | Jump to a random file (also under `⋮` More Options) |
 | `C` | **Border Crop** (drag borders inward, then press `C` or `Enter` to commit) |
 | `Del` / `Backspace` or `X` | **Delete / Erase / Blur Region** (Blur, Pixelate, Smart Heal/Delogo, or Blackout a face/object on images & videos) |
@@ -124,7 +126,7 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `G` | **Video → Animated GIF** (exports marked `[In, Out]` clip as a palette-optimized `.gif`) |
 | `Shift + Del` | **Move File to Trash / Recycle Bin** and advance to the next file |
 | `Ctrl + R` | **Resize / Resample Image** (by pixels, percentage, or CapCut blurred backdrop) or Reframe Video |
-| `B` | **Color Scaling** (Live brightness & contrast sliders for images and videos) |
+| `B` / `Shift + B` | **Video Screencap (`B`)** saved to `Screenshots` or `~/Pictures/Screencaps`; **Color Scaling (`B` on images / `Shift+B` anywhere)** |
 | `A` or `Shift + T` | **Add Caption / Text** (Fonts, sizes, pill/banner/outline backgrounds for images & videos) |
 | `R` / `L` | Rotate 90° Right / Left |
 | `H` / `V` | Flip Horizontal / Vertical |
@@ -139,7 +141,7 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `+` / `-` or `Wheel` | Zoom (centered at mouse); on video: playback speed. The wheel can step through files instead (Settings) |
 | `,` / `.` | Video: step one frame back / forward |
 | `Ctrl + C` / `Ctrl + Shift + C` | Copy image (or video frame) / copy file path |
-| `Ctrl + V` / `Ctrl + Shift + V` | **Floating Paste Overlay** from clipboard / from file (`Enter` to Stamp, `Esc` to cancel) |
+| `Ctrl + V` / `Ctrl + Shift + V` | **Paste Image** into an empty window (`Ctrl+N`) or as a **Floating Paste Overlay** on an open image (`Enter` to Stamp, `Esc` to cancel) |
 | `F2` | Rename the current file |
 | `Ctrl + G` | Go to file by number or name |
 | `S` | Video: save the current frame as PNG next to the video (with brightness/contrast) |

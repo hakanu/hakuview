@@ -67,7 +67,9 @@ from .image_ops import (
     is_animated_image,
     jpegtran_lossless_save,
     load_qimage_fast,
+    next_deduped_paste_path,
     resize_qimage,
+    resolve_screencap_folder,
     save_encoded_qimage_atomic,
     save_jpeg_matching_source,
     save_qimage_atomic,
@@ -85,6 +87,9 @@ from .video_view import VideoPlayerWidget, _format_ms
 from .widgets import FullscreenControls, chevron_icon, menu_position_under, three_dots_icon
 
 
+_OPEN_WINDOWS: set["HakuViewWindow"] = set()
+
+
 class HakuViewWindow(QMainWindow):
     """Lightweight, keyboard-driven desktop viewer for images and videos."""
 
@@ -98,6 +103,7 @@ class HakuViewWindow(QMainWindow):
         slideshow_interval: Optional[float] = None,
         start_fullscreen: bool = False,
         check_updates: bool = False,
+        default_save_dir: Optional[Path | str] = None,
     ) -> None:
         super().__init__()
 
@@ -109,6 +115,7 @@ class HakuViewWindow(QMainWindow):
         self.current_is_video: bool = False
         self._info_visible: bool = False
         self._prompt_unsaved: bool = True
+        self._default_save_dir: Optional[Path] = Path(default_save_dir) if default_save_dir is not None else None
 
         # Slideshow state (an explicit --interval wins over the saved preference)
         self.slideshow_active: bool = False
@@ -298,6 +305,7 @@ class HakuViewWindow(QMainWindow):
         self.video_view.jobEnded.connect(self._on_bg_job_ended)
         self.video_view.jobCancelled.connect(self._on_bg_job_cancelled)
         self.video_view.infoRequested.connect(self.show_media_info_dialog)
+        self.video_view.screencapRequested.connect(self.save_video_screencap)
         self.video_view.playbackFailed.connect(lambda msg: self.status.showMessage(f"⚠ {msg}", 8000))
         self.canvas.wheelNavigate.connect(lambda step: self.next_item() if step > 0 else self.prev_item())
 
@@ -748,15 +756,16 @@ class HakuViewWindow(QMainWindow):
         # in keyPressEvent, which Qt only reaches when the focused widget ignores the key.
         # Context-dependent keys (I, O, [, ], T, M) dispatch on image vs. video mode.
         self._shortcut_table = [
+            (("Ctrl+N",), self.new_empty_window, "Ctrl+N", "New empty window (paste copied image with Ctrl+V, save with Ctrl+S)"),
             (("O", "Ctrl+O"), self._on_key_o, "O / Ctrl+O", "Open file (O marks video Out-point)"),
             (("Ctrl+W", "Ctrl+Q"), self.close, "Ctrl+W / Ctrl+Q", "Close window"),
-            (("Ctrl+S",), self.save_current, "Ctrl+S", "Save changes (atomic in-place)"),
+            (("Ctrl+S",), self.save_current, "Ctrl+S", "Save changes (or save newly pasted image)"),
             (("Ctrl+Shift+S",), self.save_as_dialog, "Ctrl+Shift+S", "Save As..."),
             (("Ctrl+,",), self.show_settings_dialog, "Ctrl+,", "Settings (theme, wheel, sorting, defaults...)"),
             (("Ctrl+Z",), self.undo_edit, "Ctrl+Z", "Undo last edit"),
             (("Ctrl+M",), self.random_item, "Ctrl+M", "Jump to random file in folder"),
             (("Ctrl+G",), self.show_goto_dialog, "Ctrl+G", "Go to file by number or name"),
-            (("S",), self.save_video_frame, "S", "Video: save current frame as PNG"),
+            (("S",), self.save_video_frame, "S", "Video: save current frame next to video as PNG"),
             (("I", "Ctrl+I"), self._on_key_i, "I / Ctrl+I", "Media Inspector (I marks video In-point)"),
             (("Shift+I",), self.toggle_info_overlay, "Shift+I", "Toggle info HUD overlay"),
             (("R",), self.rotate_right, "R / L", "Rotate 90° Right / Left"),
@@ -776,7 +785,8 @@ class HakuViewWindow(QMainWindow):
             (("Shift+A",), lambda: self.apply_image_filter("auto_levels"), None, None),
             (("Shift+N",), lambda: self.apply_image_filter("invert"), None, None),
             (("Shift+Delete", "Shift+Backspace"), self.move_current_to_trash, "Shift+Del", "Move current file to OS Trash / Recycle Bin"),
-            (("B",), self.toggle_color_bar, "B", "Brightness / Contrast panel"),
+            (("B",), self._on_key_b, "B / Shift+B", "Video: save screencap to Screenshots — Image (or Shift+B): Brightness / Contrast"),
+            (("Shift+B",), self.toggle_color_bar, None, None),
             (("A", "Shift+T"), self.open_caption_dialog, "A / Shift+T", "Add caption text with background, font & size"),
             (("K", "Ctrl+K"), self.compress_current_variant, "K", "1-Click Compress (or WhatsApp Web video export)"),
             (("W", "F5"), self.toggle_slideshow, "W / F5", "Toggle Slideshow"),
@@ -791,7 +801,7 @@ class HakuViewWindow(QMainWindow):
             ((".",), lambda: self._on_key_frame_step(1), None, None),
             (("Ctrl+C",), self.copy_image_to_clipboard, "Ctrl+C", "Copy image (or current video frame)"),
             (("Ctrl+Shift+C",), self.copy_file_path, "Ctrl+Shift+C", "Copy file path"),
-            (("Ctrl+V",), self.paste_image_overlay, "Ctrl+V / Ctrl+Shift+V", "Paste floating image overlay (Shift: pick file)"),
+            (("Ctrl+V",), self.paste_image_overlay, "Ctrl+V / Ctrl+Shift+V", "Paste clipboard image (into empty window or floating overlay)"),
             (("Ctrl+Shift+V",), self.insert_overlay_from_file_dialog, None, None),
             (("F2",), self.rename_current_file, "F2", "Rename file"),
             (("0",), self.canvas.zoom_fit, "0 / 1", "Fit to window / 100% 1:1 size"),
@@ -807,7 +817,8 @@ class HakuViewWindow(QMainWindow):
             self.addAction(act)
 
     _KEYPRESS_HELP = [
-        ("← / →", "Previous / Next file in folder (Shift: seek video ±5 s)"),
+        ("← / →", "Previous / Next file in folder"),
+        ("Ctrl / Shift / Alt + ← / →", "Video seek: Ctrl ±10 s, Shift ±5 s, Alt ±30 s, Ctrl+Shift ±60 s"),
         ("Home / End, PgUp / PgDn", "First / Last file, Previous / Next file"),
         ("Space or Click", "Play / Pause video (hold Space + drag to pan image)"),
         ("Enter", "Apply crop selection, otherwise toggle fullscreen"),
@@ -869,6 +880,12 @@ class HakuViewWindow(QMainWindow):
         if self.current_is_video:
             self.export_gif_video()
 
+    def _on_key_b(self) -> None:
+        if self.current_is_video:
+            self.save_video_screencap()
+        else:
+            self.toggle_color_bar()
+
     def _mark_trim_in(self) -> None:
         self.video_view.set_trim_in()
         self.status.showMessage(f"✂ Mark In: {_format_ms(self.video_view.trim_in_ms or 0)}", 3000)
@@ -883,12 +900,32 @@ class HakuViewWindow(QMainWindow):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
-        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        mods = event.modifiers()
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
 
         if key in (Qt.Key.Key_Right, Qt.Key.Key_Left):
             forward = key == Qt.Key.Key_Right
-            if self.current_is_video and shift:
-                self.video_view.seek_relative_ms(5000 if forward else -5000)
+            if self.current_is_video and (ctrl or shift or alt):
+                if ctrl and shift:
+                    sec = 60  # VLC long jump: ±1 minute
+                elif alt:
+                    sec = 30  # ±30 seconds
+                elif ctrl:
+                    sec = 10  # VLC multi-second jump: ±10 seconds
+                else:
+                    sec = 5   # Short jump: ±5 seconds
+                delta_ms = (sec * 1000) if forward else (-sec * 1000)
+                new_pos = self.video_view.seek_relative_ms(delta_ms)
+                if new_pos is not None:
+                    arrow = "⏩" if forward else "⏪"
+                    sign = "+" if forward else "-"
+                    dur = self.video_view.player.duration()
+                    self.status.showMessage(
+                        f"{arrow} {sign}{sec}s  ({_format_ms(new_pos)} / {_format_ms(dur)})",
+                        2000,
+                    )
             elif forward:
                 self.next_item()
             else:
@@ -973,6 +1010,39 @@ class HakuViewWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Opening & Cycling Media in Folder
     # ------------------------------------------------------------------
+
+    @property
+    def _active_media_path(self) -> Optional[Path]:
+        """Current file in folder navigator, or the placeholder target path for an unsaved pasted image."""
+        if self.navigator.current_file is not None:
+            return self.navigator.current_file
+        if self.document is not None and not self.current_is_video:
+            return self.document.path
+        return None
+
+    def new_empty_window(self) -> "HakuViewWindow":
+        """Spawn a new empty HakuView window (Ctrl+N) ready for pasting an image (Ctrl+V) & saving (Ctrl+S)."""
+        default_dir = self.navigator.folder
+        if default_dir is None and self._default_save_dir is not None:
+            default_dir = self._default_save_dir
+        child = HakuViewWindow(
+            initial_path=None,
+            check_updates=False,
+            default_save_dir=default_dir,
+        )
+        if self.isVisible() and not self.isFullScreen():
+            pos = self.pos()
+            child.move(pos.x() + 28, pos.y() + 28)
+        _OPEN_WINDOWS.add(child)
+        child.destroyed.connect(lambda _obj=None, w=child: _OPEN_WINDOWS.discard(w))
+        child.show()
+        child.raise_()
+        child.activateWindow()
+        child.status.showMessage(
+            "✨ New empty window — press Ctrl+V to paste a copied image, then Ctrl+S to save.",
+            5000,
+        )
+        return child
 
     def open_file_dialog(self) -> None:
         if not self._confirm_discard_or_save():
@@ -1191,29 +1261,73 @@ class HakuViewWindow(QMainWindow):
             )
         return ok
 
-    def paste_image_overlay(self) -> bool:
-        """Paste an image from the system clipboard as a floating overlay (or open file picker if empty)."""
-        if self.document is None or self.current_is_video:
-            self.status.showMessage("Open an image first to paste an overlay.", 3000)
-            return False
+    def _read_clipboard_image(self) -> Optional[QImage]:
         cb = QApplication.clipboard()
         img = cb.image()
-        if img is None or img.isNull():
-            mime = cb.mimeData()
-            if mime is not None and mime.hasUrls():
-                for url in mime.urls():
-                    local = url.toLocalFile()
-                    if local and Path(local).is_file():
-                        loaded = load_qimage_fast(local)
-                        if loaded is not None and not loaded.isNull():
-                            img = loaded
-                            break
-            if (img is None or img.isNull()) and cb.text().strip():
-                candidate = Path(cb.text().strip())
-                if candidate.is_file():
-                    loaded = load_qimage_fast(candidate)
+        if img is not None and not img.isNull():
+            return img
+        mime = cb.mimeData()
+        if mime is not None and mime.hasUrls():
+            for url in mime.urls():
+                local = url.toLocalFile()
+                if local and Path(local).is_file():
+                    loaded = load_qimage_fast(local)
                     if loaded is not None and not loaded.isNull():
-                        img = loaded
+                        return loaded
+        txt = cb.text().strip()
+        if txt:
+            candidate = Path(txt)
+            if candidate.is_file():
+                loaded = load_qimage_fast(candidate)
+                if loaded is not None and not loaded.isNull():
+                    return loaded
+        return None
+
+    def _resolve_default_save_folder(self) -> Path:
+        if self._default_save_dir is not None and self._default_save_dir.is_dir():
+            return self._default_save_dir
+        if self.navigator.folder is not None and self.navigator.folder.is_dir():
+            return self.navigator.folder
+        if self.app_settings.last_folder:
+            last = Path(self.app_settings.last_folder)
+            if last.is_dir():
+                return last
+        return resolve_screencap_folder()
+
+    def _next_unsaved_paste_path(self, folder: Optional[Path] = None, ext: str = ".png") -> Path:
+        target_dir = folder if (folder is not None and folder.is_dir()) else self._resolve_default_save_folder()
+        return next_deduped_paste_path(target_dir, ext=ext)
+
+    def load_pasted_new_image(self, image: QImage) -> bool:
+        """Load `image` as the base canvas image in an empty window (unsaved until Ctrl+S)."""
+        if image is None or image.isNull():
+            return False
+        self.video_view.stop()
+        self.current_is_video = False
+        self.stack.setCurrentWidget(self.canvas)
+        self.reset_color_adjustments(update_view=False)
+
+        placeholder = self._next_unsaved_paste_path(ext=".png")
+        self.document = ImageDocument(placeholder, image.copy(), unsaved_new=True)
+        self._show_document(reset_view=True)
+        self._update_ui_state()
+        self.status.showMessage(
+            f"📋 Pasted new image ({image.width()} × {image.height()} px) — press Ctrl+S to save.",
+            4500,
+        )
+        return True
+
+    def paste_image_overlay(self) -> bool:
+        """Paste an image from the system clipboard (as a new document if empty, or floating overlay if open)."""
+        if self.current_is_video:
+            self.status.showMessage("Press Ctrl+N for a new empty window to paste an image.", 3000)
+            return False
+        img = self._read_clipboard_image()
+        if self.document is None:
+            if img is not None and not img.isNull():
+                return self.load_pasted_new_image(img)
+            self.status.showMessage("Clipboard does not contain a copied image to paste.", 3000)
+            return False
         if img is not None and not img.isNull():
             return self.start_paste_overlay(img)
         return self.insert_overlay_from_file_dialog()
@@ -1337,7 +1451,7 @@ class HakuViewWindow(QMainWindow):
         """Open the Image Resize / Resample dialog (Ctrl+R) or Video Reframe dialog."""
         if self.current_is_video:
             return self.resize_video_dialog()
-        cur = self.navigator.current_file
+        cur = self._active_media_path
         if cur is None or self.document is None:
             self.status.showMessage("Open an image or video first to resize.", 2500)
             return None
@@ -1400,7 +1514,7 @@ class HakuViewWindow(QMainWindow):
         """Open the interactive Caption / Text Overlay dialog for the current image or video."""
         from .caption_dialog import CaptionDialog, apply_caption_to_image
 
-        cur = self.navigator.current_file
+        cur = self._active_media_path
         if cur is None:
             self.status.showMessage("Open an image or video first.", 2500)
             return None
@@ -1476,7 +1590,7 @@ class HakuViewWindow(QMainWindow):
 
     def delete_selected_region(self) -> Optional[Path]:
         """Fast path for Del/Backspace: immediately erase an active image selection, or open the Erase dialog."""
-        cur = self.navigator.current_file
+        cur = self._active_media_path
         if cur is None:
             return None
         if (
@@ -1501,7 +1615,7 @@ class HakuViewWindow(QMainWindow):
         """Open the interactive Erase / Redact Region dialog for the current image or video."""
         from .erase_dialog import EraseRegionDialog, erase_image_region, sample_surrounding_color
 
-        cur = self.navigator.current_file
+        cur = self._active_media_path
         if cur is None:
             self.status.showMessage("Open an image or video first.", 2500)
             return None
@@ -1644,6 +1758,8 @@ class HakuViewWindow(QMainWindow):
             self.status.showMessage("Undid last change.", 2500)
 
     def save_current(self) -> bool:
+        if self.document is not None and not self.current_is_video and self.document.unsaved_new:
+            return self.save_as_dialog()
         if not self.color_bar.is_neutral:
             return bool(self.save_adjusted_image())
         if self.document is None or self.current_is_video:
@@ -1698,24 +1814,43 @@ class HakuViewWindow(QMainWindow):
     def save_as_dialog(self) -> bool:
         if self.document is None or self.current_is_video:
             return False
-        default_path = str(self.document.path)
+        was_unsaved_new = self.document.unsaved_new
+        if was_unsaved_new:
+            deduped = self._next_unsaved_paste_path(ext=self.document.path.suffix or ".png")
+            self.document.path = deduped
+            default_path = str(deduped)
+            title = "Save New Image"
+        else:
+            default_path = str(self.document.path)
+            title = "Save Image As"
         out_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Image As",
+            title,
             default_path,
-            "Images (*.jpg *.jpeg *.png *.webp *.bmp *.tiff)",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tiff)",
         )
         if not out_path:
             return False
         dest = Path(out_path)
+        if not dest.suffix:
+            dest = dest.with_suffix(".png")
         try:
+            if was_unsaved_new and not self.color_bar.is_neutral:
+                self.document.current = adjust_qimage_color(
+                    self.document.current, self.color_bar.brightness, self.color_bar.contrast
+                )
+                self.reset_color_adjustments(update_view=False)
             how = self._write_document(dest)
             self.cache.invalidate(dest)
             self.cache.put(dest, self.document.current)
             self.document.mark_saved(dest)
-            # Refresh folder list if saved into current folder
-            if self.navigator.folder and dest.parent.resolve() == self.navigator.folder.resolve():
+            self._default_save_dir = dest.parent
+            self.app_settings.last_folder = str(dest.parent)
+            if was_unsaved_new or (
+                self.navigator.folder and dest.parent.resolve() == self.navigator.folder.resolve()
+            ):
                 self.navigator.load_target(dest)
+                self._watch_current()
             self._update_ui_state()
             self.status.showMessage(f"Saved as {dest.name}{how}", 4000)
             return True
@@ -1823,6 +1958,35 @@ class HakuViewWindow(QMainWindow):
             self.status.showMessage(f"⚠ Couldn't write {target.name}: {exc}", 6000)
             return None
         self._add_new_file_to_folder(target, f"🖼 Frame saved ({image.width()} × {image.height()})")
+        return target
+
+    def save_video_screencap(self, home_override: Optional[Path] = None) -> Optional[Path]:
+        """BS.Player-style screencap ('B'): save the current video frame into Screenshots or ~/Pictures/Screencaps."""
+        cur = self.navigator.current_file
+        if not self.current_is_video or cur is None:
+            return None
+        image = self.video_view.grab_current_frame()
+        if image is None or image.isNull():
+            self.status.showMessage("⚠ Couldn't grab video frame for screencap.", 3000)
+            return None
+        image = adjust_qimage_color(image, self.color_bar.brightness, self.color_bar.contrast)
+        out_dir = resolve_screencap_folder(home=home_override)
+        ms = max(0, self.video_view.player.position())
+        stamp = f"cap_{ms // 60000:02d}m{ms // 1000 % 60:02d}s{ms % 1000:03d}"
+        target = _next_variant_path(out_dir / f"{cur.stem}.png", stamp, ".png")
+        self._ignore_watch_until = time.monotonic() + 1.5
+        try:
+            save_qimage_atomic(image, target)
+        except Exception as exc:
+            self.status.showMessage(f"⚠ Couldn't save screencap: {exc}", 6000)
+            return None
+        if self.navigator.folder and out_dir.resolve() == self.navigator.folder.resolve():
+            self.navigator.load_target(cur)
+            self._update_ui_state()
+        self.status.showMessage(
+            f"📸 Screencap saved: {target}  ({image.width()} × {image.height()})",
+            5000,
+        )
         return target
 
     def copy_file_path(self) -> None:
@@ -2385,33 +2549,35 @@ class HakuViewWindow(QMainWindow):
         self.canvas.set_selection_size_hint(human_size(est))
 
     def _update_ui_state(self) -> None:
-        cur = self.navigator.current_file
-        has_file = cur is not None
-        is_img = has_file and not self.current_is_video and self.document is not None
-        is_vid = has_file and self.current_is_video
+        nav_cur = self.navigator.current_file
+        cur = self._active_media_path
+        on_disk = nav_cur is not None
+        has_media = cur is not None
+        is_img = has_media and not self.current_is_video and self.document is not None
+        is_vid = on_disk and self.current_is_video
         self.color_bar.set_video_mode(bool(is_vid))
 
         self.btn_prev.setEnabled(self.navigator.count > 1)
         self.btn_next.setEnabled(self.navigator.count > 1)
-        self.btn_color.setEnabled(has_file)
+        self.btn_color.setEnabled(has_media)
 
         self.btn_edit.setEnabled(is_img or is_vid)
         self.btn_caption.setEnabled(is_img or is_vid)
         self.btn_draw.setEnabled(bool(is_img))
         self.btn_erase.setEnabled(is_img or is_vid)
         self.btn_resize.setEnabled(is_img or is_vid)
-        self.btn_paste.setEnabled(bool(is_img))
+        self.btn_paste.setEnabled(not is_vid)
         self.btn_rot_left.setEnabled(is_img or is_vid)
         self.btn_rot_right.setEnabled(is_img or is_vid)
         self.btn_shuffle_jump.setEnabled(self.navigator.count > 1)
         self.btn_goto.setEnabled(self.navigator.count > 0)
         self.act_draw.setVisible(bool(is_img))
         self.act_resize_image.setVisible(bool(is_img))
-        self.act_paste_overlay.setVisible(bool(is_img))
+        self.act_paste_overlay.setVisible(not is_vid)
         self.act_insert_overlay.setVisible(bool(is_img))
         self.act_eyedropper.setVisible(bool(is_img))
         self.filter_menu.menuAction().setVisible(bool(is_img))
-        self.act_strip_exif.setVisible(bool(is_img))
+        self.act_strip_exif.setVisible(bool(is_img and on_disk))
         if not is_img and self.paste_bar.isVisible():
             self.paste_bar.hide()
         if not is_img and self.draw_bar.isVisible():
@@ -2434,17 +2600,19 @@ class HakuViewWindow(QMainWindow):
             self.btn_compress.setToolTip(
                 f"Compress & save as a variant in the same folder  (K)\nPreset: {label} — arrow to change"
             )
-        self.btn_compress.setEnabled(is_img or is_vid)
+        self.btn_compress.setEnabled((is_img and on_disk) or is_vid)
         self.btn_fit.setEnabled(is_img)
         self.btn_actual.setEnabled(is_img)
-        self.btn_info.setEnabled(has_file)
+        self.btn_info.setEnabled(on_disk)
 
         modified = bool(is_img and self.document and self.document.modified)
+        can_undo = bool(is_img and self.document and self.document.undo_stack)
+        unsaved_new = bool(is_img and self.document and self.document.unsaved_new)
         has_color_adj = not self.color_bar.is_neutral
-        self.btn_undo.setEnabled(modified)
+        self.btn_undo.setEnabled(can_undo)
         self.btn_save.setEnabled(modified or has_color_adj)
 
-        if not has_file or cur is None:
+        if not has_media or cur is None:
             self.setWindowTitle(__app_name__)
             self.lbl_position.setText("[0 / 0]")
             self.lbl_filename.setText("No file loaded")
@@ -2453,13 +2621,13 @@ class HakuViewWindow(QMainWindow):
             self.lbl_modified.setText("")
             return
 
-        idx_str = f"[{self.navigator.index + 1} / {self.navigator.count}]"
+        idx_str = f"[{self.navigator.index + 1} / {self.navigator.count}]" if on_disk else "[New]"
         mod_prefix = "● " if modified else ""
         self.setWindowTitle(f"{mod_prefix}{cur.name}  {idx_str} — {__app_name__}")
         self.lbl_position.setText(idx_str)
 
         try:
-            fsize = human_size(cur.stat().st_size)
+            fsize = human_size(cur.stat().st_size) if on_disk else ""
         except OSError:
             fsize = ""
         if modified and is_img and self.document is not None:
@@ -2474,13 +2642,15 @@ class HakuViewWindow(QMainWindow):
             h = self.document.current.height()
             self.lbl_dimensions.setText(f"{w} × {h} px")
             self.lbl_zoom.setText(f"{int(round(self.canvas.zoom_scale * 100))}%")
-            if has_color_adj:
+            if unsaved_new:
+                self.lbl_modified.setText("● NEW PASTE (Ctrl+S to save)")
+            elif has_color_adj:
                 self.lbl_modified.setText("● COLOR ADJ (Ctrl+S to save new)")
             elif modified:
                 self.lbl_modified.setText("● MODIFIED (Ctrl+S to save)")
             else:
                 self.lbl_modified.setText("")
-            if self._info_visible:
+            if self._info_visible and on_disk:
                 self.canvas.set_info_overlay(True, self._build_info_text())
         else:
             self.lbl_dimensions.setText("VIDEO" if is_vid else "")
@@ -2497,6 +2667,7 @@ class HakuViewWindow(QMainWindow):
         self._save_session()
         self.video_view.stop()
         self.video_view.shutdown()
+        _OPEN_WINDOWS.discard(self)
         super().closeEvent(event)
 
     def resizeEvent(self, event) -> None:
@@ -2538,15 +2709,18 @@ class HakuViewWindow(QMainWindow):
         add("💾 Save (Ctrl+S)", self.save_current, modified)
         add("💾 Save As... (Ctrl+Shift+S)", self.save_as_dialog, is_img)
         file_menu = menu.addMenu("📁 File")
+        add("🪟 New Empty Window (Ctrl+N)", self.new_empty_window, True, file_menu)
         add("📋 Copy Image (Ctrl+C)", self.copy_image_to_clipboard, is_img or is_vid, file_menu)
         if is_vid:
-            add("🖼 Save Current Frame (S)", self.save_video_frame, True, file_menu)
+            add("📸 Save Screencap to Screenshots (B)", self.save_video_screencap, True, file_menu)
+            add("🖼 Save Current Frame Next to Video (S)", self.save_video_frame, True, file_menu)
             add("📱 Export WhatsApp Video (K)", self.export_whatsapp_video, True, file_menu)
             add("🎞️ Export Animated GIF (G)", self.export_gif_video, True, file_menu)
             add("📐 Resize && Reframe Video...", self.resize_video_dialog, True, file_menu)
             add("🔇 Strip Audio (Lossless)", self.strip_video_audio, True, file_menu)
         else:
-            add("🔒 Strip EXIF / GPS Metadata (Clean Copy)", self.strip_current_metadata, is_img, file_menu)
+            add("📋 Paste Clipboard Image (Ctrl+V)", self.paste_image_overlay, True, file_menu)
+            add("🔒 Strip EXIF / GPS Metadata (Clean Copy)", self.strip_current_metadata, is_img and has_file, file_menu)
         add("Copy File Path (Ctrl+Shift+C)", self.copy_file_path, has_file, file_menu)
         add("✏ Rename... (F2)", self.rename_current_file, has_file, file_menu)
         add("🗑️ Move to Trash (Shift+Del)", self.move_current_to_trash, has_file, file_menu)
@@ -2557,7 +2731,7 @@ class HakuViewWindow(QMainWindow):
         add("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action, is_img or is_vid)
         add("🧹 Erase / Redact Region... (X / Del)", self.open_erase_region_dialog, is_img or is_vid)
         add("💬 Add Caption / Text... (A)", self.open_caption_dialog, is_img or is_vid)
-        add("🎨 Brightness && Contrast (B)", self.toggle_color_bar, has_file)
+        add("🎨 Brightness && Contrast (Shift+B)", self.toggle_color_bar, is_img or is_vid)
         image_menu = menu.addMenu("🖼 Image")
         image_menu.setEnabled(is_img)
         add("✏️ Draw && Annotate (D)", self.toggle_draw_bar, is_img, image_menu)

@@ -2722,6 +2722,131 @@ def test_resize_slider_target_kb_and_crop_size_estimate(tmp_path: Path, qtbot, m
     assert "→ ~" in win.lbl_filename.text()
 
 
+def test_vlc_video_multi_second_jumps_ctrl_shift_alt(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtTest import QTest
+
+    win = _video_window(tmp_path, qtbot)
+    pos_holder = [20_000]
+    win.video_view.player.duration = lambda: 180_000
+    win.video_view.player.position = lambda: pos_holder[0]
+    win.video_view.player.setPosition = lambda p: pos_holder.__setitem__(0, p)
+
+    # Ctrl+Right -> +10s, Ctrl+Left -> -10s
+    QTest.keyClick(win, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
+    assert pos_holder[0] == 30_000
+    assert "+10s" in win.status.currentMessage()
+
+    QTest.keyClick(win, Qt.Key.Key_Left, Qt.KeyboardModifier.ControlModifier)
+    assert pos_holder[0] == 20_000
+    assert "-10s" in win.status.currentMessage()
+
+    # Shift+Right -> +5s
+    QTest.keyClick(win, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+    assert pos_holder[0] == 25_000
+
+    # Alt+Right -> +30s
+    QTest.keyClick(win, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+    assert pos_holder[0] == 55_000
+
+    # Ctrl+Shift+Right -> +60s
+    QTest.keyClick(win, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert pos_holder[0] == 115_000
+
+
+def test_bsplayer_b_screencap_screenshots_vs_screencaps_fallback(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from hakuview.image_ops import resolve_screencap_folder
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # 1. When no Screenshots folder exists -> creates $HOME/Pictures/Screencaps
+    fallback_dir = resolve_screencap_folder(home=fake_home)
+    assert fallback_dir == fake_home / "Pictures" / "Screencaps"
+    assert fallback_dir.is_dir()
+
+    # 2. When $HOME/Pictures/Screenshots exists -> prefers Screenshots
+    screenshots_dir = fake_home / "Pictures" / "Screenshots"
+    screenshots_dir.mkdir(parents=True)
+    assert resolve_screencap_folder(home=fake_home) == screenshots_dir
+
+    # 3. Pressing 'B' in video mode writes de-duped PNG screencaps into Screenshots folder
+    win = _video_window(tmp_path, qtbot)
+    sample_frame = QImage(64, 48, QImage.Format.Format_RGB32)
+    sample_frame.fill(QColor(20, 140, 220))
+    monkeypatch.setattr(win.video_view, "grab_current_frame", lambda: sample_frame)
+    monkeypatch.setattr("hakuview.window.resolve_screencap_folder", lambda home=None: screenshots_dir)
+
+    win._on_key_b()
+    cap1 = screenshots_dir / "clip_cap_00m00s000.png"
+    assert cap1.exists()
+
+    win._on_key_b()
+    cap2 = screenshots_dir / "clip_cap_00m00s000_2.png"
+    assert cap2.exists()
+
+
+def test_ctrl_n_new_empty_window_paste_and_ctrl_s_deduped_save(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from datetime import datetime
+    from PySide6.QtWidgets import QApplication, QFileDialog
+    from hakuview.image_ops import next_deduped_paste_path
+
+    save_dir = tmp_path / "saved_pastes"
+    save_dir.mkdir()
+    _create_sample_image(save_dir / "existing.png", width=32, height=32, color=QColor(10, 20, 30))
+
+    parent_win = HakuViewWindow(initial_path=save_dir / "existing.png", check_updates=False)
+    parent_win._prompt_unsaved = False
+    qtbot.addWidget(parent_win)
+
+    # 1. Ctrl+N spawns an empty HakuViewWindow inheriting save_dir
+    child1 = parent_win.new_empty_window()
+    child1._prompt_unsaved = False
+    qtbot.addWidget(child1)
+    assert child1.document is None
+    assert child1.navigator.current_file is None
+
+    # 2. Copy an image to clipboard and press Ctrl+V (paste_image_overlay) in the empty window
+    clip_img = QImage(80, 60, QImage.Format.Format_RGB32)
+    clip_img.fill(QColor(220, 90, 40))
+    QApplication.clipboard().setImage(clip_img)
+
+    assert child1.paste_image_overlay()
+    assert child1.document is not None
+    assert child1.document.unsaved_new
+    assert child1.document.modified
+    assert "[New]" in child1.windowTitle()
+
+    # Freeze timestamp so consecutive pastes test deterministic _2 deduplication
+    fixed_dt = datetime(2026, 11, 17, 8, 30, 0)
+    monkeypatch.setattr(
+        "hakuview.window.next_deduped_paste_path",
+        lambda folder, ext=".png": next_deduped_paste_path(folder, ext=ext, now=fixed_dt),
+    )
+    # Accept whatever pre-populated default path save_as_dialog offers
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda _parent, _title, default_path, _flt: (default_path, ""))
+
+    # 3. Ctrl+S saves to pasted_20261117_083000.png and transitions window to normal on-disk file
+    assert child1.save_current()
+    first_saved = save_dir / "pasted_20261117_083000.png"
+    assert first_saved.exists()
+    assert not child1.document.unsaved_new
+    assert not child1.document.modified
+    assert child1.navigator.current_file == first_saved
+
+    # 4. Second Ctrl+N -> Ctrl+V -> Ctrl+S automatically de-dupes to pasted_20261117_083000_2.png
+    child2 = parent_win.new_empty_window()
+    child2._prompt_unsaved = False
+    qtbot.addWidget(child2)
+    assert child2.paste_image_overlay()
+    assert child2.save_current()
+    second_saved = save_dir / "pasted_20261117_083000_2.png"
+    assert second_saved.exists()
+    assert child2.navigator.current_file == second_saved
+    child1.close()
+    child2.close()
+
+
+
 
 
 

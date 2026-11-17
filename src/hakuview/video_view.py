@@ -1360,6 +1360,7 @@ class VideoPlayerWidget(QWidget):
     jobCancelled = Signal(str)
     playbackFailed = Signal(str)  # user-facing message
     infoRequested = Signal()
+    screencapRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1466,6 +1467,15 @@ class VideoPlayerWidget(QWidget):
         self.btn_resize.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_resize.clicked.connect(self.open_resize_dialog)
         bar_layout.addWidget(self.btn_resize)
+
+        self.btn_screencap = QPushButton("📸")
+        self.btn_screencap.setToolTip(
+            "Take Screencap to Screenshots or ~/Pictures/Screencaps folder (Shortcut: B)"
+        )
+        self.btn_screencap.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_screencap.setFixedWidth(32)
+        self.btn_screencap.clicked.connect(self.screencapRequested.emit)
+        bar_layout.addWidget(self.btn_screencap)
 
         self.mute_btn = QPushButton("🔊")
         self.mute_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -2005,12 +2015,13 @@ class VideoPlayerWidget(QWidget):
         else:
             self.player.play()
 
-    def seek_relative_ms(self, delta_ms: int) -> None:
+    def seek_relative_ms(self, delta_ms: int) -> Optional[int]:
         dur = self.player.duration()
         if dur <= 0:
-            return
+            return None
         new_pos = max(0, min(dur, self.player.position() + delta_ms))
         self.player.setPosition(new_pos)
+        return new_pos
 
     def toggle_mute(self) -> None:
         self.set_muted(not self.audio.isMuted())
