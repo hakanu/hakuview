@@ -53,6 +53,7 @@ class ImageCanvas(QWidget):
 
         # Selection rectangle in image pixel coordinates
         self._selection: QRect = QRect()
+        self._selection_size_hint: str = ""
         # Floating paste overlay in image pixel coordinates
         self._overlay_image: Optional[QImage] = None
         self._overlay_rect: QRect = QRect()
@@ -159,15 +160,22 @@ class ImageCanvas(QWidget):
         self._info_text = text
         self.update()
 
+    def set_selection_size_hint(self, hint: str) -> None:
+        if self._selection_size_hint != hint:
+            self._selection_size_hint = hint
+            self.update()
+
     def clear_selection(self) -> None:
-        if not self._selection.isNull():
+        if not self._selection.isNull() or self._selection_size_hint:
             self._selection = QRect()
+            self._selection_size_hint = ""
             self.selectionChanged.emit(QRect())
             self.update()
 
     def select_all(self) -> None:
         if self._image is not None and not self._image.isNull():
             self._selection = self._image.rect()
+            self._selection_size_hint = ""
             self.selectionChanged.emit(self._selection)
             self.update()
 
@@ -568,12 +576,13 @@ class ImageCanvas(QWidget):
             and not self._image.isNull()
             and self._selection == self._image.rect()
         )
+        size_part = f"  •  ~{self._selection_size_hint}" if (self._selection_size_hint and not is_full_border) else ""
         action_hint = (
             "Drag any border/corner inward, then press C or Enter"
             if is_full_border
             else "Press C/Enter to Crop  •  Del/X to Erase/Blur (Esc to cancel)"
         )
-        badge_text = f"{w} × {h} px{ar_str}  •  {action_hint}"
+        badge_text = f"{w} × {h} px{ar_str}{size_part}  •  {action_hint}"
 
         font = QFont(self.font())
         font.setPointSize(9)

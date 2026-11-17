@@ -2665,6 +2665,64 @@ def test_move_current_to_trash_advances_to_next_file(tmp_path: Path, qtbot, monk
     assert win.navigator.current_file.name == "02_green.jpg"
 
 
+def test_resize_slider_target_kb_and_crop_size_estimate(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PIL import Image
+    from PySide6.QtWidgets import QDialog
+    from hakuview.resize_dialog import ImageResizeDialog
+
+    # Create a high-entropy 600x400 image that encodes to >30 KB at high quality
+    raw = bytes(((x * 73 + y * 151 + (x ^ y) * 19) & 0xFF) for y in range(400) for x in range(600 * 3))
+    pil_im = Image.frombytes("RGB", (600, 400), raw)
+    jpg_path = tmp_path / "gov_form_photo.jpg"
+    pil_im.save(jpg_path, format="JPEG", quality=96)
+    orig_disk_bytes = jpg_path.stat().st_size
+    assert orig_disk_bytes > 30 * 1024
+
+    win = HakuViewWindow(initial_path=jpg_path, check_updates=False)
+    win._prompt_unsaved = False
+    qtbot.addWidget(win)
+
+    # 1. Scale slider in ImageResizeDialog updates dimensions and shows live final file size
+    dlg = ImageResizeDialog(frame=win.document.current, source_path=jpg_path)
+    qtbot.addWidget(dlg)
+    full_est = dlg.estimated_bytes
+    assert full_est > 20 * 1024
+    dlg.slider_scale.setValue(50)
+    assert (dlg.target_width, dlg.target_height) == (300, 200)
+    assert dlg.estimated_bytes < full_est
+    assert "50%  →  " in dlg.lbl_slider_size.text()
+    assert "Final Size:" in dlg.lbl_summary.text()
+
+    # 2. One-click fit_to_target_kb(15) guarantees final encoded size <= 15 KB and matches saved file on disk
+    fitted_bytes = dlg.fit_to_target_kb(15)
+    assert 0 < fitted_bytes <= 15 * 1024
+
+    expected_bytes = []
+
+    def accept_fit_15kb(self):
+        b = self.fit_to_target_kb(15)
+        expected_bytes.append(b)
+        self._save_as_copy = True
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ImageResizeDialog, "exec", accept_fit_15kb)
+    saved_copy = win.open_resize_dialog()
+    assert saved_copy is not None and saved_copy.exists()
+    assert saved_copy.stat().st_size == expected_bytes[0]
+    assert saved_copy.stat().st_size <= 15 * 1024
+
+    # 3. Cropping on canvas shows live estimated KB on crop badge and updates status bar filename (orig -> ~new)
+    crop_rect = QRect(0, 0, 200, 150)
+    win.canvas._selection = crop_rect
+    win.canvas.selectionChanged.emit(crop_rect)
+    assert win.canvas._selection_size_hint != ""
+    assert "KB" in win.canvas._selection_size_hint or "B" in win.canvas._selection_size_hint
+
+    assert win.apply_crop()
+    assert "→ ~" in win.lbl_filename.text()
+
+
+
 
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, field
 import importlib.util
+import io
 import math
 import os
 from pathlib import Path
@@ -15,7 +16,7 @@ import threading
 from typing import List, Optional, Tuple
 
 from PIL import Image, ImageFilter, ImageOps, JpegImagePlugin
-from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QRunnable, QSize, QThreadPool, Qt, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QObject, QPointF, QRect, QRectF, QRunnable, QSize, QThreadPool, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
 from .formatting import human_size
@@ -659,19 +660,112 @@ def _jpegtran_optimize(src_path: Path, out_path: Path) -> None:
         raise CompressionError(f"jpegtran failed:\n{err}")
 
 
-def _save_jpeg_like_source(image: Image.Image, src_path: Path, out_path: Path) -> None:
+def _save_jpeg_like_source(image: Image.Image, src_path: Optional[Path], out_target) -> None:
     """Encode `image` as JPEG with the same quantization tables/subsampling as `src_path`."""
     kwargs: dict = {"quality": 95}
+    if src_path is not None:
+        try:
+            with Image.open(src_path) as src:
+                if src.format == "JPEG":
+                    kwargs = {"qtables": src.quantization}
+                    sampling = JpegImagePlugin.get_sampling(src)
+                    if sampling >= 0:
+                        kwargs["subsampling"] = sampling
+        except OSError:
+            pass
+    dest = str(out_target) if isinstance(out_target, Path) else out_target
+    image.convert("RGB").save(dest, format="JPEG", optimize=True, progressive=True, **kwargs)
+
+
+def encode_qimage_bytes(
+    image: QImage,
+    source_path: Optional[Path | str] = None,
+    *,
+    ext: Optional[str] = None,
+    quality: int = -1,
+) -> bytes:
+    """Encode `image` in memory using the exact format/quality rules HakuView uses on save."""
+    if image is None or image.isNull():
+        return b""
+    src = Path(source_path) if source_path is not None else None
+    suffix = (ext or (src.suffix if src is not None else ".jpg") or ".png").lower()
+    if not suffix.startswith("."):
+        suffix = f".{suffix}"
+
+    if suffix in (".jpg", ".jpeg"):
+        pil_rgb = _qimage_to_pil(image).convert("RGB")
+        buf = io.BytesIO()
+        if quality > 0:
+            q = max(1, min(100, int(quality)))
+            pil_rgb.save(buf, format="JPEG", quality=q, optimize=True, progressive=True)
+        else:
+            _save_jpeg_like_source(pil_rgb, src if (src is not None and src.exists()) else None, buf)
+        return buf.getvalue()
+
+    if suffix == ".webp":
+        pil_img = _qimage_to_pil(image)
+        out_img = pil_img if image.hasAlphaChannel() else pil_img.convert("RGB")
+        buf = io.BytesIO()
+        q = max(1, min(100, int(quality))) if quality > 0 else 90
+        out_img.save(buf, format="WEBP", quality=q, method=4)
+        return buf.getvalue()
+
+    qbuf = QBuffer()
+    qbuf.open(QIODevice.OpenModeFlag.WriteOnly)
+    fmt = suffix.lstrip(".").encode("ascii", errors="ignore") or b"png"
+    writer = QImageWriter(qbuf, fmt)
+    writer.setQuality(max(0, min(100, int(quality))) if quality >= 0 else 95)
+    if writer.write(image):
+        return bytes(qbuf.data())
+
+    # Pillow fallback for exotic extensions
+    pil_img = _qimage_to_pil(image)
+    if suffix in (".bmp",):
+        pil_img = pil_img.convert("RGB")
+    buf = io.BytesIO()
+    pil_img.save(buf, format=suffix.lstrip(".").upper() or "PNG")
+    return buf.getvalue()
+
+
+def estimate_encoded_size(
+    image: QImage,
+    source_path: Optional[Path | str] = None,
+    *,
+    ext: Optional[str] = None,
+    quality: int = -1,
+) -> int:
+    """Return the exact encoded byte size of `image` when saved with `(ext, quality)`."""
+    return len(encode_qimage_bytes(image, source_path=source_path, ext=ext, quality=quality))
+
+
+def save_encoded_qimage_atomic(
+    image: QImage,
+    target_path: Path | str,
+    *,
+    source_path: Optional[Path | str] = None,
+    quality: int = -1,
+) -> int:
+    """Atomically write `image` to `target_path` using `encode_qimage_bytes` so disk bytes match estimates."""
+    dest = Path(target_path).expanduser().resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    suffix = dest.suffix if dest.suffix else ".png"
+    payload = encode_qimage_bytes(image, source_path=source_path, ext=suffix, quality=quality)
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}_tmp_", suffix=suffix, dir=str(dest.parent))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
     try:
-        with Image.open(src_path) as src:
-            if src.format == "JPEG":
-                kwargs = {"qtables": src.quantization}
-                sampling = JpegImagePlugin.get_sampling(src)
-                if sampling >= 0:
-                    kwargs["subsampling"] = sampling
-    except OSError:
-        pass
-    image.convert("RGB").save(str(out_path), format="JPEG", optimize=True, progressive=True, **kwargs)
+        tmp_path.write_bytes(payload)
+        if dest.exists():
+            try:
+                os.chmod(tmp_path, dest.stat().st_mode)
+            except OSError:
+                pass
+        os.replace(str(tmp_path), str(dest))
+        return len(payload)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 COMPRESSION_MODES = [
@@ -791,6 +885,7 @@ class ImageDocument:
         self.undo_stack: List[QImage] = []
         self.ops: List[str] = []
         self.modified: bool = False
+        self.target_save_quality: int = -1
 
     def _push_undo(self, op: str) -> None:
         self.undo_stack.append(self.current)
@@ -882,20 +977,25 @@ class ImageDocument:
         resample: str = "lanczos",
         bg_color: str = "#0f172a",
         blur_sigma: int = 28,
+        quality: int = -1,
     ) -> bool:
         tw, th = max(1, int(width)), max(1, int(height))
-        if mode == "scale" and tw == self.current.width() and th == self.current.height():
+        same_dims = mode == "scale" and tw == self.current.width() and th == self.current.height()
+        if same_dims and quality <= 0:
             return False
         self._push_undo("resize")
-        self.current = resize_qimage(
-            self.current,
-            tw,
-            th,
-            mode=mode,
-            resample=resample,
-            bg_color=bg_color,
-            blur_sigma=blur_sigma,
-        )
+        if quality > 0:
+            self.target_save_quality = int(quality)
+        if not same_dims:
+            self.current = resize_qimage(
+                self.current,
+                tw,
+                th,
+                mode=mode,
+                resample=resample,
+                bg_color=bg_color,
+                blur_sigma=blur_sigma,
+            )
         return True
 
     def apply_annotations(self, strokes: List[DrawStroke]) -> bool:
@@ -920,6 +1020,8 @@ class ImageDocument:
         if self.ops:
             self.ops.pop()
         self.modified = bool(self.undo_stack)
+        if not self.modified:
+            self.target_save_quality = -1
         return True
 
     def reset(self) -> bool:
@@ -929,6 +1031,7 @@ class ImageDocument:
         self.undo_stack.clear()
         self.ops.clear()
         self.modified = False
+        self.target_save_quality = -1
         return True
 
     def mark_saved(self, new_path: Optional[Path] = None) -> None:
@@ -938,6 +1041,7 @@ class ImageDocument:
         self.undo_stack.clear()
         self.ops.clear()
         self.modified = False
+        self.target_save_quality = -1
 
     def net_transform(self) -> Optional[str]:
         """The single jpegtran transform equal to all edits so far, "identity", or None if lossy.

@@ -60,12 +60,15 @@ from .image_ops import (
     ImagePreloadCache,
     _next_variant_path,
     adjust_qimage_color,
+    crop_qimage,
     describe_load_failure,
     compress_image_as_variant,
+    estimate_encoded_size,
     is_animated_image,
     jpegtran_lossless_save,
     load_qimage_fast,
     resize_qimage,
+    save_encoded_qimage_atomic,
     save_jpeg_matching_source,
     save_qimage_atomic,
     strip_image_metadata,
@@ -156,6 +159,11 @@ class HakuViewWindow(QMainWindow):
         self._last_caption_spec = None
         self._last_erase_style: str = "blur"
         self._last_erase_strength: int = 60
+        self._est_doc_cache: tuple[int, int, str, int] = (0, -1, "", 0)
+        self._crop_size_timer = QTimer(self)
+        self._crop_size_timer.setSingleShot(True)
+        self._crop_size_timer.setInterval(40)
+        self._crop_size_timer.timeout.connect(self._compute_crop_selection_size_exact)
 
         if initial_path is not None:
             self.open_path(Path(initial_path), pick_random=pick_random)
@@ -1341,7 +1349,7 @@ class HakuViewWindow(QMainWindow):
             if not self.color_bar.is_neutral
             else self.document.current
         )
-        dlg = ImageResizeDialog(frame=preview_img, parent=self)
+        dlg = ImageResizeDialog(frame=preview_img, parent=self, source_path=cur)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
 
@@ -1349,6 +1357,8 @@ class HakuViewWindow(QMainWindow):
         mode = dlg.mode
         resample = dlg.resample_filter
         bg_hex = dlg.bg_color_hex
+        quality = getattr(dlg, "quality", -1)
+        out_ext = getattr(dlg, "output_ext", "") or (cur.suffix if cur.suffix else ".png")
 
         if dlg.save_as_copy:
             resized = resize_qimage(
@@ -1359,22 +1369,22 @@ class HakuViewWindow(QMainWindow):
                 resample=resample,
                 bg_color=bg_hex,
             )
-            ext = cur.suffix if cur.suffix else ".png"
-            target = _next_variant_path(cur, f"{tw}x{th}", ext)
+            target = _next_variant_path(cur, f"{tw}x{th}", out_ext)
             try:
                 self._ignore_watch_until = time.monotonic() + 1.5
-                save_qimage_atomic(resized, target)
-                self._add_new_file_to_folder(target, f"📐 Resized image ({tw}×{th}) saved")
+                written = save_encoded_qimage_atomic(resized, target, source_path=cur, quality=quality)
+                self._add_new_file_to_folder(target, f"📐 Resized image ({tw}×{th}, {human_size(written)}) saved")
                 return target
             except Exception as exc:
                 QMessageBox.critical(self, "Save Error", f"Failed to save resized image:\n{exc}")
                 return None
 
-        if self.document.resize_image(tw, th, mode=mode, resample=resample, bg_color=bg_hex):
+        if self.document.resize_image(tw, th, mode=mode, resample=resample, bg_color=bg_hex, quality=quality):
             self._show_document(reset_view=True)
             self._update_ui_state()
+            est_str = human_size(self._estimated_document_bytes())
             self.status.showMessage(
-                f"📐 Resized to {tw} × {th} px (Ctrl+Z to undo, Ctrl+S to save).",
+                f"📐 Resized to {tw} × {th} px (~{est_str}) — Ctrl+Z to undo, Ctrl+S to save.",
                 4500,
             )
             return cur
@@ -1614,9 +1624,10 @@ class HakuViewWindow(QMainWindow):
         if self.document.crop(sel):
             self._show_document(reset_view=True)
             self._update_ui_state()
+            est_str = human_size(self._estimated_document_bytes())
             self.status.showMessage(
-                f"Cropped to {self.document.current.width()} × {self.document.current.height()} px (Ctrl+S to save, Ctrl+Z to undo)",
-                4000,
+                f"Cropped to {self.document.current.width()} × {self.document.current.height()} px (~{est_str}) — Ctrl+S to save, Ctrl+R to resize/fit KB, Ctrl+Z to undo",
+                4500,
             )
             return True
         return False
@@ -1668,6 +1679,11 @@ class HakuViewWindow(QMainWindow):
         doc = self.document
         jpegs = (".jpg", ".jpeg")
         self._ignore_watch_until = time.monotonic() + 1.5  # our own write isn't an external change
+        if doc.target_save_quality > 0 and dest.suffix.lower() in (".jpg", ".jpeg", ".webp"):
+            written = save_encoded_qimage_atomic(
+                doc.current, dest, source_path=doc.path, quality=doc.target_save_quality
+            )
+            return f" ({human_size(written)}, Q{doc.target_save_quality})"
         if doc.path.suffix.lower() in jpegs and dest.suffix.lower() in jpegs and doc.path.exists():
             transform = doc.net_transform()
             if transform == "identity" and dest == doc.path:
@@ -2314,9 +2330,59 @@ class HakuViewWindow(QMainWindow):
         else:
             self.lbl_zoom.setText("")
 
+    def _estimated_document_bytes(self) -> int:
+        if self.document is None or self.document.current.isNull():
+            return 0
+        doc = self.document
+        ck = int(doc.current.cacheKey())
+        q = int(doc.target_save_quality)
+        p_str = str(doc.path)
+        if self._est_doc_cache[:3] == (ck, q, p_str):
+            return self._est_doc_cache[3]
+        est = estimate_encoded_size(doc.current, doc.path, quality=q)
+        self._est_doc_cache = (ck, q, p_str, est)
+        return est
+
     def _on_selection_changed(self, rect: QRect) -> None:
         is_ready = (not self.current_is_video and self.document is not None) or self.current_is_video
         self.btn_crop.setEnabled(is_ready)
+        if self.current_is_video or self.document is None or self.document.current.isNull():
+            self._crop_size_timer.stop()
+            self.canvas.set_selection_size_hint("")
+            return
+        full_rect = self.document.current.rect()
+        bounded = rect.intersected(full_rect)
+        if bounded.isNull() or bounded == full_rect or bounded.width() < 2 or bounded.height() < 2:
+            self._crop_size_timer.stop()
+            self.canvas.set_selection_size_hint("")
+            return
+        if bounded.width() * bounded.height() <= 600_000:
+            self._crop_size_timer.stop()
+            self._compute_crop_selection_size_exact()
+        else:
+            # Instant area-proportional estimate while dragging handles on huge images, exact in 40ms
+            base_bytes = self._estimated_document_bytes() if self.document.modified else 0
+            if base_bytes <= 0:
+                try:
+                    base_bytes = self.document.path.stat().st_size
+                except OSError:
+                    base_bytes = self._estimated_document_bytes()
+            area_ratio = (bounded.width() * bounded.height()) / float(max(1, full_rect.width() * full_rect.height()))
+            approx = max(256, int(base_bytes * (area_ratio ** 0.85)))
+            self.canvas.set_selection_size_hint(human_size(approx))
+            self._crop_size_timer.start()
+
+    def _compute_crop_selection_size_exact(self) -> None:
+        if self.current_is_video or self.document is None or self.document.current.isNull():
+            return
+        full_rect = self.document.current.rect()
+        bounded = self.canvas.selection.intersected(full_rect)
+        if bounded.isNull() or bounded == full_rect or bounded.width() < 2 or bounded.height() < 2:
+            self.canvas.set_selection_size_hint("")
+            return
+        cropped = crop_qimage(self.document.current, bounded)
+        est = estimate_encoded_size(cropped, self.document.path, quality=self.document.target_save_quality)
+        self.canvas.set_selection_size_hint(human_size(est))
 
     def _update_ui_state(self) -> None:
         cur = self.navigator.current_file
@@ -2396,7 +2462,12 @@ class HakuViewWindow(QMainWindow):
             fsize = human_size(cur.stat().st_size)
         except OSError:
             fsize = ""
-        self.lbl_filename.setText(f"{cur.name}   ({fsize})" if fsize else cur.name)
+        if modified and is_img and self.document is not None:
+            est_size = human_size(self._estimated_document_bytes())
+            size_label = f"{fsize} → ~{est_size}" if fsize else f"~{est_size}"
+            self.lbl_filename.setText(f"{cur.name}   ({size_label})")
+        else:
+            self.lbl_filename.setText(f"{cur.name}   ({fsize})" if fsize else cur.name)
 
         if is_img and self.document is not None:
             w = self.document.current.width()
