@@ -1352,6 +1352,9 @@ class VideoPlayerWidget(QWidget):
     stripAudioCompleted = Signal(Path)
     captionCompleted = Signal(Path)
     eraseCompleted = Signal(Path)
+    videoCropCompleted = Signal(Path)
+    storyboardCompleted = Signal(Path)
+    speedExportCompleted = Signal(Path)
     colorExportCompleted = Signal(Path)
     colorExportFailed = Signal(str)
     jobStarted = Signal(str)
@@ -1367,6 +1370,7 @@ class VideoPlayerWidget(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._in_slideshow: bool = False
         self.loop: bool = True  # replay at the end when not in a slideshow
+        self.ab_loop: bool = False  # loop strictly between [trim_in_ms, trim_out_ms]
         self._slider_dragging: bool = False
         self.trim_in_ms: Optional[int] = None
         self.trim_out_ms: Optional[int] = None
@@ -1435,6 +1439,14 @@ class VideoPlayerWidget(QWidget):
         self.btn_trim.setEnabled(False)
         self.btn_trim.clicked.connect(self.execute_trim)
         bar_layout.addWidget(self.btn_trim)
+
+        self.btn_ab_loop = QPushButton("🔁 A-B")
+        self.btn_ab_loop.setToolTip("Loop playback seamlessly between marked [In, Out] points")
+        self.btn_ab_loop.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_ab_loop.setCheckable(True)
+        self.btn_ab_loop.setVisible(False)
+        self.btn_ab_loop.toggled.connect(self.set_ab_loop)
+        bar_layout.addWidget(self.btn_ab_loop)
 
         self.btn_clear_trim = QPushButton("✕")
         self.btn_clear_trim.setToolTip("Clear trim markers (Shortcut: Esc)")
@@ -1734,9 +1746,24 @@ class VideoPlayerWidget(QWidget):
             self.trim_in_ms = None
         self._update_trim_ui()
 
+    def set_ab_loop(self, enabled: bool) -> bool:
+        """Enable or disable seamless A-B looping between `[trim_in_ms, trim_out_ms]`."""
+        active = bool(enabled and self.has_trim_points())
+        self.ab_loop = active
+        self.btn_ab_loop.blockSignals(True)
+        self.btn_ab_loop.setChecked(active)
+        self.btn_ab_loop.blockSignals(False)
+        if active and self.trim_in_ms is not None:
+            pos = self.player.position()
+            end_ms = self.trim_out_ms if self.trim_out_ms is not None else self.player.duration()
+            if pos < self.trim_in_ms or (end_ms > 0 and pos >= end_ms):
+                self.player.setPosition(self.trim_in_ms)
+        return active
+
     def clear_trim(self) -> None:
         self.trim_in_ms = None
         self.trim_out_ms = None
+        self.set_ab_loop(False)
         self._update_trim_ui()
 
     def _update_trim_ui(self) -> None:
@@ -1751,6 +1778,7 @@ class VideoPlayerWidget(QWidget):
         self.btn_set_out.setText(out_str)
 
         has_any = self.has_trim_points()
+        self.btn_ab_loop.setVisible(has_any)
         self.btn_clear_trim.setVisible(has_any)
 
         if has_any:
@@ -1997,6 +2025,83 @@ class VideoPlayerWidget(QWidget):
             return None
         return dest_path
 
+    def export_cropped_video(
+        self,
+        crop_rect: QRect,
+        frame_size: tuple[int, int],
+        *,
+        only_trim_range: bool = False,
+    ) -> Optional[Path]:
+        """Start spatial crop export (`<name>_crop.mp4`) using lazy-loaded `_CropVideoWorker`."""
+        if self._current_path is None or crop_rect.isEmpty():
+            return None
+        from .video_tools import _CropVideoWorker
+
+        dest_path = _next_variant_path(self._current_path, "crop", ".mp4")
+        trim_bounds = self.trim_range_bounds_ms() if only_trim_range else None
+        job = _CropVideoWorker(
+            self._current_path,
+            dest_path,
+            crop_rect,
+            frame_size=frame_size,
+            trim_range_ms=trim_bounds,
+        )
+        if not self._start_job(
+            job,
+            self.videoCropCompleted.emit,
+            lambda err: QMessageBox.warning(self, "Video Crop Error", err),
+        ):
+            return None
+        return dest_path
+
+    def export_storyboard_sheet(self, cols: int = 4, rows: int = 4) -> Optional[Path]:
+        """Generate an MPC-HC / BS.Player 4x4 timestamped storyboard contact sheet PNG."""
+        if self._current_path is None:
+            return None
+        from .video_tools import _StoryboardWorker
+
+        dest_path = _next_variant_path(self._current_path, "storyboard", ".png")
+        job = _StoryboardWorker(self._current_path, dest_path, cols=cols, rows=rows)
+        if not self._start_job(
+            job,
+            self.storyboardCompleted.emit,
+            lambda err: QMessageBox.warning(self, "Storyboard Error", err),
+        ):
+            return None
+        return dest_path
+
+    def export_speed_video(
+        self,
+        speed: float,
+        *,
+        mute_audio: bool = False,
+        only_trim_range: bool = False,
+    ) -> Optional[Path]:
+        """Export a speed-ramped / timelapse MP4 (`<name>_2x.mp4`, etc.)."""
+        if self._current_path is None:
+            return None
+        from .video_tools import _SpeedRampWorker
+
+        tag = f"{speed:g}x".replace(".", "_")
+        dest_path = _next_variant_path(self._current_path, tag, ".mp4")
+        trim_bounds = self.trim_range_bounds_ms() if only_trim_range else None
+        dur_s = (self.player.duration() / 1000.0) if self.player.duration() > 0 else None
+        job = _SpeedRampWorker(
+            self._current_path,
+            dest_path,
+            speed,
+            mute_audio=mute_audio,
+            trim_range_ms=trim_bounds,
+            source_duration_sec=dur_s,
+        )
+        if not self._start_job(
+            job,
+            self.speedExportCompleted.emit,
+            lambda err: QMessageBox.warning(self, "Speed Export Error", err),
+        ):
+            return None
+        return dest_path
+
     def stop(self) -> None:
         self.banner.setVisible(False)
         self.clear_trim()
@@ -2143,6 +2248,13 @@ class VideoPlayerWidget(QWidget):
         self.time_label.setText(f"{_format_ms(pos)} / {_format_ms(dur)}")
 
     def _on_position_changed(self, pos: int) -> None:
+        if self.ab_loop and self.has_trim_points() and not self._slider_dragging:
+            dur = self.player.duration()
+            start_ms = self.trim_in_ms if self.trim_in_ms is not None else 0
+            end_ms = self.trim_out_ms if self.trim_out_ms is not None else dur
+            if end_ms > start_ms and (pos >= end_ms or pos < start_ms - 300):
+                self.player.setPosition(start_ms)
+                return
         if not self._slider_dragging:
             self.seek_slider.setValue(pos)
             dur = self.player.duration()
@@ -2161,7 +2273,10 @@ class VideoPlayerWidget(QWidget):
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            if self._in_slideshow:
+            if self.ab_loop and self.has_trim_points():
+                self.player.setPosition(self.trim_in_ms or 0)
+                self.player.play()
+            elif self._in_slideshow:
                 self._emit_finished_once()
             elif self.loop:
                 self.player.setPosition(0)

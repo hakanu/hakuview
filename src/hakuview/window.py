@@ -298,6 +298,9 @@ class HakuViewWindow(QMainWindow):
         self.video_view.stripAudioCompleted.connect(self._on_video_audio_stripped)
         self.video_view.captionCompleted.connect(self._on_video_captioned)
         self.video_view.eraseCompleted.connect(self._on_video_erased)
+        self.video_view.videoCropCompleted.connect(self._on_video_cropped)
+        self.video_view.storyboardCompleted.connect(self._on_video_storyboard_done)
+        self.video_view.speedExportCompleted.connect(self._on_video_speed_done)
         self.video_view.colorExportCompleted.connect(self._on_color_export_done)
         self.video_view.colorExportFailed.connect(self._on_color_export_failed)
         self.video_view.jobStarted.connect(self._on_bg_job_started)
@@ -344,11 +347,15 @@ class HakuViewWindow(QMainWindow):
             "🎨  Pick Pixel Color (Eyedropper)   (P / Alt+Click)", self.toggle_eyedropper
         )
         self.filter_menu = self.edit_menu.addMenu("✨  Quick Filters")
+        self.filter_menu.addAction("📄  Clean Document / Receipt Scan   (Shift+D)", lambda: self.apply_image_filter("doc_scan"))
         self.filter_menu.addAction("⚡  Auto-Levels (Stretch Contrast)   (Shift+A)", lambda: self.apply_image_filter("auto_levels"))
         self.filter_menu.addAction("🔍  Sharpen (Unsharp Mask)   (Shift+S)", lambda: self.apply_image_filter("sharpen"))
         self.filter_menu.addAction("⚫  Grayscale   (Shift+G)", lambda: self.apply_image_filter("grayscale"))
         self.filter_menu.addAction("🌗  Invert Colors   (Shift+N)", lambda: self.apply_image_filter("invert"))
         self.filter_menu.addAction("📜  Vintage Sepia", lambda: self.apply_image_filter("sepia"))
+        self.act_export_pdf = self.edit_menu.addAction(
+            "📄  Export to PDF / Passport ID Sheet...   (Ctrl+P)", self.open_pdf_export_dialog
+        )
         self.act_strip_exif = self.edit_menu.addAction(
             "🔒  Strip EXIF / GPS Metadata (Clean Copy)", self.strip_current_metadata
         )
@@ -358,6 +365,13 @@ class HakuViewWindow(QMainWindow):
         self.edit_menu.addAction("⇆  Flip Horizontal   (H)", self.flip_horizontal)
         self.edit_menu.addAction("⇅  Flip Vertical   (V)", self.flip_vertical)
         self._edit_video_sep = self.edit_menu.addSeparator()
+        self.act_crop_video = self.edit_menu.addAction("✂️  Crop Video Area...   (C)", self.open_video_crop_dialog)
+        self.act_storyboard = self.edit_menu.addAction(
+            "🎞️  Save Storyboard Sheet (4×4)...   (Shift+S)", self.export_video_storyboard
+        )
+        self.act_speed_video = self.edit_menu.addAction(
+            "⏩  Export Speed-Ramped / Timelapse Video...", self.open_speed_export_dialog
+        )
         self.act_strip_audio = self.edit_menu.addAction("🔇  Strip Audio (Lossless)", self.strip_video_audio)
         self.act_export_gif = self.edit_menu.addAction("🎞️  Export Animated GIF...   (G)", self.export_gif_video)
         self.act_resize_video = self.edit_menu.addAction("📐  Resize && Reframe Video...", self.resize_video_dialog)
@@ -761,6 +775,7 @@ class HakuViewWindow(QMainWindow):
             (("Ctrl+W", "Ctrl+Q"), self.close, "Ctrl+W / Ctrl+Q", "Close window"),
             (("Ctrl+S",), self.save_current, "Ctrl+S", "Save changes (or save newly pasted image)"),
             (("Ctrl+Shift+S",), self.save_as_dialog, "Ctrl+Shift+S", "Save As..."),
+            (("Ctrl+P",), self.open_pdf_export_dialog, "Ctrl+P", "Export image to PDF (Fit / A4 / Letter / 4-Up Passport ID + Target KB)"),
             (("Ctrl+,",), self.show_settings_dialog, "Ctrl+,", "Settings (theme, wheel, sorting, defaults...)"),
             (("Ctrl+Z",), self.undo_edit, "Ctrl+Z", "Undo last edit"),
             (("Ctrl+M",), self.random_item, "Ctrl+M", "Jump to random file in folder"),
@@ -772,16 +787,17 @@ class HakuViewWindow(QMainWindow):
             (("L",), self.rotate_left, None, None),
             (("H",), self.flip_horizontal, "H / V", "Flip Horizontal / Vertical"),
             (("V",), self.flip_vertical, None, None),
-            (("C",), self.trigger_crop_action, "C", "Border Crop (drag borders, then C or Enter)"),
+            (("C",), self.trigger_crop_action, "C", "Border Crop (with aspect pills) on image — Spatial Area Crop on video"),
             (("Ctrl+Y",), self.apply_crop, "Ctrl+Y", "Apply crop selection"),
             (("X",), self.open_erase_region_dialog, "X / Del", "Erase / blur / pixelate / heal a region on image or video"),
             (("Delete", "Backspace"), self.delete_selected_region, None, None),
-            (("D",), self.toggle_draw_bar, "D", "Draw & Annotate (Pen, Marker, Arrow, Box, Circle)"),
+            (("D",), self.toggle_draw_bar, "D", "Draw & Annotate (Pen, Marker, Arrow, Box, Step ①, Loupe 🔍, Spotlight 🔦)"),
             (("P",), self.toggle_eyedropper, "P / Alt+Click", "Eyedropper: pick pixel color & copy #HEX to clipboard"),
             (("Ctrl+R",), self.open_resize_dialog, "Ctrl+R", "Resize / Resample image or reframe video"),
             (("G",), self._on_key_g, "G", "Video: export clip (or [In, Out] range) as animated GIF"),
-            (("Shift+G",), lambda: self.apply_image_filter("grayscale"), "Shift+G / S / A / N", "Quick Filters: Grayscale / Sharpen / Auto-Levels / Invert"),
-            (("Shift+S",), lambda: self.apply_image_filter("sharpen"), None, None),
+            (("Shift+D",), lambda: self.apply_image_filter("doc_scan"), "Shift+D", "Clean Document / Receipt Scan filter (whiten paper & sharpen ink)"),
+            (("Shift+G",), lambda: self.apply_image_filter("grayscale"), "Shift+G / S / A / N", "Quick Filters: Grayscale / Sharpen (Video: 4×4 Storyboard) / Auto-Levels / Invert"),
+            (("Shift+S",), self._on_key_shift_s, None, None),
             (("Shift+A",), lambda: self.apply_image_filter("auto_levels"), None, None),
             (("Shift+N",), lambda: self.apply_image_filter("invert"), None, None),
             (("Shift+Delete", "Shift+Backspace"), self.move_current_to_trash, "Shift+Del", "Move current file to OS Trash / Recycle Bin"),
@@ -879,6 +895,12 @@ class HakuViewWindow(QMainWindow):
     def _on_key_g(self) -> None:
         if self.current_is_video:
             self.export_gif_video()
+
+    def _on_key_shift_s(self) -> None:
+        if self.current_is_video:
+            self.export_video_storyboard()
+        else:
+            self.apply_image_filter("sharpen")
 
     def _on_key_b(self) -> None:
         if self.current_is_video:
@@ -1693,14 +1715,97 @@ class HakuViewWindow(QMainWindow):
             return cur
         return None
 
-    def trigger_crop_action(self) -> bool:
-        """Toggle border crop handles with C (for image), or export trim (for video)."""
+    def open_pdf_export_dialog(self) -> Optional[Path]:
+        """Open the lazy-loaded PDF Export & Passport ID Sheet dialog (Ctrl+P)."""
         if self.current_is_video:
-            if not self.video_view.has_trim_points():
-                self.status.showMessage("Mark In ([ or I) and Out (] or O) points first, then press T to trim.", 4000)
-                return False
-            self.video_view.execute_trim()
-            return True
+            self.status.showMessage("Open an image (or press B to capture a frame) to export as PDF.", 3000)
+            return None
+        if self.document is None:
+            self.status.showMessage("Open or paste an image first to export to PDF.", 2500)
+            return None
+
+        from .doc_pdf import PdfExportDialog
+
+        preview_img = (
+            adjust_qimage_color(self.document.current, self.color_bar.brightness, self.color_bar.contrast)
+            if not self.color_bar.is_neutral
+            else self.document.current
+        )
+        dlg = PdfExportDialog(frame=preview_img, source_path=self._active_media_path, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.saved_path is None:
+            return None
+        saved = dlg.saved_path
+        try:
+            sz = human_size(saved.stat().st_size)
+        except OSError:
+            sz = ""
+        self.status.showMessage(f"📄 Exported PDF: {saved.name} ({sz})", 5000)
+        return saved
+
+    def open_video_crop_dialog(self) -> Optional[Path]:
+        """Open the lazy-loaded Spatial Video Crop dialog (C in video mode)."""
+        if not self.current_is_video or self.navigator.current_file is None:
+            return None
+        from .video_tools import VideoCropDialog
+
+        frame = self.video_view.grab_current_frame()
+        if frame is not None and not frame.isNull() and not self.color_bar.is_neutral:
+            frame = adjust_qimage_color(frame, self.color_bar.brightness, self.color_bar.contrast)
+        trim_label = None
+        bounds = self.video_view.trim_range_bounds_ms()
+        if bounds is not None:
+            trim_label = f"{_format_ms(bounds[0])} – {_format_ms(bounds[1])}"
+
+        dlg = VideoCropDialog(frame=frame, trim_range_label=trim_label, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        target = self.video_view.export_cropped_video(
+            dlg.crop_rect,
+            frame_size=dlg.frame_size,
+            only_trim_range=dlg.use_trim_range,
+        )
+        if target is not None:
+            self.status.showMessage(f"⏳ Exporting cropped video ({target.name}) in the background...", 5000)
+        return target
+
+    def export_video_storyboard(self) -> Optional[Path]:
+        """Generate an MPC-HC / BS.Player 4x4 timestamped storyboard contact sheet PNG."""
+        if not self.current_is_video:
+            return None
+        target = self.video_view.export_storyboard_sheet(cols=4, rows=4)
+        if target is not None:
+            self.status.showMessage(f"⏳ Generating 4×4 storyboard sheet ({target.name})...", 5000)
+        return target
+
+    def open_speed_export_dialog(self) -> Optional[Path]:
+        """Open the lazy-loaded Timelapse / Speed-Ramp Video Export dialog."""
+        if not self.current_is_video:
+            return None
+        from .video_tools import SpeedRampDialog
+
+        cur_rate = float(self.video_view.player.playbackRate() or 1.0)
+        init_spd = cur_rate if abs(cur_rate - 1.0) > 0.05 else 2.0
+        trim_label = None
+        bounds = self.video_view.trim_range_bounds_ms()
+        if bounds is not None:
+            trim_label = f"{_format_ms(bounds[0])} – {_format_ms(bounds[1])}"
+
+        dlg = SpeedRampDialog(initial_speed=init_spd, trim_range_label=trim_label, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        target = self.video_view.export_speed_video(
+            dlg.speed,
+            mute_audio=dlg.mute_audio,
+            only_trim_range=dlg.use_trim_range,
+        )
+        if target is not None:
+            self.status.showMessage(f"⏳ Exporting {dlg.speed:g}× video ({target.name})...", 5000)
+        return target
+
+    def trigger_crop_action(self) -> bool:
+        """Toggle border crop handles with C (for image), or spatial crop dialog (for video)."""
+        if self.current_is_video:
+            return self.open_video_crop_dialog() is not None
         if self.document is None:
             return False
         sel = self.canvas.selection
@@ -2104,6 +2209,7 @@ class HakuViewWindow(QMainWindow):
         if self.current_is_video or self.document is None:
             return False
         labels = {
+            "doc_scan": "📄 Clean Document Scan",
             "auto_levels": "⚡ Auto-Levels",
             "sharpen": "🔍 Sharpen",
             "grayscale": "⚫ Grayscale",
@@ -2372,6 +2478,15 @@ class HakuViewWindow(QMainWindow):
     def _on_video_erased(self, new_path: Path) -> None:
         self._add_new_file_to_folder(new_path, "🧹 Redacted video saved")
 
+    def _on_video_cropped(self, new_path: Path) -> None:
+        self._add_new_file_to_folder(new_path, "✂️ Cropped video saved")
+
+    def _on_video_storyboard_done(self, new_path: Path) -> None:
+        self._add_new_file_to_folder(new_path, "🎞️ Storyboard contact sheet saved")
+
+    def _on_video_speed_done(self, new_path: Path) -> None:
+        self._add_new_file_to_folder(new_path, "⏩ Speed-ramped video saved")
+
     def export_adjusted_video(self) -> Optional[Path]:
         """Write a copy of the current video with the brightness/contrast baked in (background ffmpeg)."""
         if not self.current_is_video:
@@ -2577,25 +2692,29 @@ class HakuViewWindow(QMainWindow):
         self.act_insert_overlay.setVisible(bool(is_img))
         self.act_eyedropper.setVisible(bool(is_img))
         self.filter_menu.menuAction().setVisible(bool(is_img))
+        self.act_export_pdf.setVisible(bool(is_img))
         self.act_strip_exif.setVisible(bool(is_img and on_disk))
         if not is_img and self.paste_bar.isVisible():
             self.paste_bar.hide()
         if not is_img and self.draw_bar.isVisible():
             self.draw_bar.hide()
         self._edit_video_sep.setVisible(bool(is_vid))
+        self.act_crop_video.setVisible(bool(is_vid))
+        self.act_storyboard.setVisible(bool(is_vid))
+        self.act_speed_video.setVisible(bool(is_vid))
         self.act_strip_audio.setVisible(bool(is_vid))
         self.act_export_gif.setVisible(bool(is_vid))
         self.act_resize_video.setVisible(bool(is_vid))
         self.btn_crop.setEnabled(is_img or is_vid)
         if is_vid:
-            self.btn_crop.setText("✂ Trim")
-            self.btn_crop.setToolTip("Export the marked clip with FFmpeg: mark In / Out with [ / ] or I / O, then press T  (T)")
+            self.btn_crop.setText("✂ Crop")
+            self.btn_crop.setToolTip("Spatial Video Crop: drag borders to crop area & export MP4  (C)")
             self.btn_compress.setToolTip(
                 "Export a WhatsApp Web friendly MP4 (lowered bitrate, H.264 + AAC, under 16 MB limit)  (K)"
             )
         else:
             self.btn_crop.setText("✂ Crop")
-            self.btn_crop.setToolTip("Show border crop handles (or drag a box), then press C or Enter to apply the crop  (C)")
+            self.btn_crop.setToolTip("Show border crop handles + aspect presets, then press C or Enter to crop  (C)")
             label = next((name for name, m in COMPRESSION_MODES if m == self.compress_mode), COMPRESSION_MODES[0][0])
             self.btn_compress.setToolTip(
                 f"Compress & save as a variant in the same folder  (K)\nPreset: {label} — arrow to change"
@@ -2714,12 +2833,16 @@ class HakuViewWindow(QMainWindow):
         if is_vid:
             add("📸 Save Screencap to Screenshots (B)", self.save_video_screencap, True, file_menu)
             add("🖼 Save Current Frame Next to Video (S)", self.save_video_frame, True, file_menu)
+            add("🎞️ Save 4×4 Storyboard Sheet (Shift+S)", self.export_video_storyboard, True, file_menu)
+            add("✂️ Crop Video Frame Area... (C)", self.open_video_crop_dialog, True, file_menu)
+            add("⏩ Export Speed-Ramped / Timelapse...", self.open_speed_export_dialog, True, file_menu)
             add("📱 Export WhatsApp Video (K)", self.export_whatsapp_video, True, file_menu)
             add("🎞️ Export Animated GIF (G)", self.export_gif_video, True, file_menu)
             add("📐 Resize && Reframe Video...", self.resize_video_dialog, True, file_menu)
             add("🔇 Strip Audio (Lossless)", self.strip_video_audio, True, file_menu)
         else:
             add("📋 Paste Clipboard Image (Ctrl+V)", self.paste_image_overlay, True, file_menu)
+            add("📄 Export to PDF / Passport ID Sheet... (Ctrl+P)", self.open_pdf_export_dialog, is_img, file_menu)
             add("🔒 Strip EXIF / GPS Metadata (Clean Copy)", self.strip_current_metadata, is_img and has_file, file_menu)
         add("Copy File Path (Ctrl+Shift+C)", self.copy_file_path, has_file, file_menu)
         add("✏ Rename... (F2)", self.rename_current_file, has_file, file_menu)
@@ -2728,7 +2851,11 @@ class HakuViewWindow(QMainWindow):
         add("Open in Default App", self.open_in_default_app, has_file, file_menu)
         menu.addSeparator()
 
-        add("✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)", self.trigger_crop_action, is_img or is_vid)
+        add(
+            "✂ Trim Video (T)" if is_vid else "✂ Border Crop (C)",
+            self.video_view.execute_trim if is_vid else self.trigger_crop_action,
+            is_img or is_vid,
+        )
         add("🧹 Erase / Redact Region... (X / Del)", self.open_erase_region_dialog, is_img or is_vid)
         add("💬 Add Caption / Text... (A)", self.open_caption_dialog, is_img or is_vid)
         add("🎨 Brightness && Contrast (Shift+B)", self.toggle_color_bar, is_img or is_vid)
@@ -2740,6 +2867,7 @@ class HakuViewWindow(QMainWindow):
         add("📋 Paste Image Overlay (Ctrl+V)", self.paste_image_overlay, is_img, image_menu)
         add("🖼 Insert Image Overlay from File... (Ctrl+Shift+V)", self.insert_overlay_from_file_dialog, is_img, image_menu)
         filters_sub = image_menu.addMenu("✨ Quick Filters")
+        add("📄 Clean Document / Receipt Scan (Shift+D)", lambda: self.apply_image_filter("doc_scan"), is_img, filters_sub)
         add("⚡ Auto-Levels (Shift+A)", lambda: self.apply_image_filter("auto_levels"), is_img, filters_sub)
         add("🔍 Sharpen (Shift+S)", lambda: self.apply_image_filter("sharpen"), is_img, filters_sub)
         add("⚫ Grayscale (Shift+G)", lambda: self.apply_image_filter("grayscale"), is_img, filters_sub)

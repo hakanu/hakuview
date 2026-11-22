@@ -2846,6 +2846,213 @@ def test_ctrl_n_new_empty_window_paste_and_ctrl_s_deduped_save(tmp_path: Path, q
     child2.close()
 
 
+def test_doc_scan_filter_crop_aspect_presets_and_pdf_export(tmp_path: Path, qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+    from hakuview.doc_pdf import PdfExportDialog, encode_pdf_bytes
+
+    # Shadowed grey "receipt" photo with dark ink strokes
+    doc_img = QImage(320, 240, QImage.Format.Format_RGB32)
+    for y in range(240):
+        shade = 165 + (y * 30) // 240  # uneven lighting gradient across paper
+        for x in range(320):
+            doc_img.setPixelColor(x, y, QColor(shade, shade, shade - 4))
+    for x in range(40, 280):
+        for y in (60, 61, 110, 111, 160, 161):
+            doc_img.setPixelColor(x, y, QColor(28, 28, 32))
+
+    src_path = tmp_path / "receipt.jpg"
+    doc_img.save(str(src_path), "JPG", 92)
+
+    win = HakuViewWindow(initial_path=src_path, check_updates=False)
+    win._prompt_unsaved = False
+    qtbot.addWidget(win)
+
+    # 1. Clean Document Scan filter whitens shadowed background to pure white while keeping dark ink
+    assert win.apply_image_filter("doc_scan")
+    paper_px = win.document.current.pixelColor(20, 20)
+    ink_px = win.document.current.pixelColor(120, 60)
+    assert paper_px.red() >= 245
+    assert ink_px.red() < 90
+    win.undo_edit()
+
+    # 2. Crop Aspect-Ratio Preset locks selection to 35:45 Passport ID ratio
+    win.trigger_crop_action()
+    win.canvas.set_crop_aspect_ratio(35.0 / 45.0, "35×45 ID")
+    sel = win.canvas.selection
+    assert win.canvas.crop_aspect_label == "35×45 ID"
+    assert abs((sel.width() / float(sel.height())) - (35.0 / 45.0)) < 0.03
+    win.canvas.clear_selection()
+
+    # 3. PDF Export across all page modes + <= 25 KB auto-fit + end-to-end save
+    for mode in ("fit_image", "a4", "letter", "passport_4up"):
+        pdf_b = encode_pdf_bytes(doc_img, page_mode=mode, quality=80)
+        assert pdf_b.startswith(b"%PDF-")
+
+    dlg = PdfExportDialog(frame=doc_img, source_path=src_path)
+    qtbot.addWidget(dlg)
+    fitted = dlg.fit_to_target_kb(25)
+    assert 0 < fitted <= 25 * 1024
+    assert dlg.pdf_bytes.startswith(b"%PDF-")
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda _p, _t, default_pdf, _f: (default_pdf, ""))
+    dlg._on_save_clicked()
+    assert dlg.saved_path == tmp_path / "receipt.pdf"
+    assert dlg.saved_path.exists() and dlg.saved_path.read_bytes().startswith(b"%PDF-")
+
+
+def test_draw_step_badges_magnifier_loupe_and_spotlight(tmp_path: Path, qtbot) -> None:
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtTest import QTest
+
+    base = QImage(260, 200, QImage.Format.Format_RGB32)
+    base.fill(QColor(235, 240, 248))
+    for y in range(70, 110):
+        for x in range(80, 120):
+            base.setPixelColor(x, y, QColor(20, 160, 90))
+    img_path = tmp_path / "screen.png"
+    base.save(str(img_path))
+
+    win = HakuViewWindow(initial_path=img_path, check_updates=False)
+    win._prompt_unsaved = False
+    qtbot.addWidget(win)
+    win.resize(600, 480)
+    win.show()
+
+    assert win.toggle_draw_bar()
+    assert set(("step", "loupe", "spotlight")).issubset(win.draw_bar.tool_buttons.keys())
+
+    # 1. Auto-incrementing Step badges: click twice -> "1", "2"; undo -> click again -> "2"
+    win.draw_bar.set_tool("step")
+    for wx, wy in ((220, 180), (290, 220)):
+        QTest.mouseClick(win.canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(wx, wy).toPoint())
+    assert [s.label for s in win.canvas.draw_strokes] == ["1", "2"]
+
+    win.undo_edit()
+    assert [s.label for s in win.canvas.draw_strokes] == ["1"]
+    QTest.mouseClick(win.canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(300, 230).toPoint())
+    assert [s.label for s in win.canvas.draw_strokes] == ["1", "2"]
+
+    # 2. Add Magnifier Loupe + Spotlight strokes and bake onto ImageDocument
+    from hakuview.image_ops import DrawStroke
+
+    win.canvas.add_draw_stroke(DrawStroke(tool="loupe", color="#38bdf8", size=6, points=[QPointF(95, 90), QPointF(140, 90)]))
+    win.canvas.add_draw_stroke(DrawStroke(tool="spotlight", color="#facc15", size=6, points=[QPointF(60, 55), QPointF(150, 130)]))
+    assert win.apply_draw_annotations()
+    assert win.document.modified
+    assert win.document.current != base
+
+
+def test_video_spatial_crop_and_ab_loop(tmp_path: Path, qtbot, monkeypatch) -> None:
+    import json
+    import shutil
+    import subprocess
+    from PySide6.QtWidgets import QDialog
+    from hakuview.video_tools import VideoCropDialog, _CropVideoWorker, normalize_even_crop
+
+    # 1. Even-dimension crop normalization & A-B loop playback
+    norm = normalize_even_crop(QRect(5, 7, 121, 91), 240, 160)
+    assert norm.width() % 2 == 0 and norm.height() % 2 == 0
+
+    win = _video_window(tmp_path, qtbot)
+    pos_state = [1200]
+    win.video_view.player.duration = lambda: 10_000
+    win.video_view.player.position = lambda: pos_state[0]
+    win.video_view.player.setPosition = lambda p: pos_state.__setitem__(0, p)
+
+    win.video_view.set_trim_in(1000)
+    win.video_view.set_trim_out(3000)
+    assert not win.video_view.btn_ab_loop.isHidden()
+    assert win.video_view.set_ab_loop(True)
+
+    # Crossing Out-point loops seamlessly back to In-point (1000 ms)
+    win.video_view._on_position_changed(3050)
+    assert pos_state[0] == 1000
+
+    win.video_view.clear_trim()
+    assert not win.video_view.ab_loop
+
+    # 2. Pressing C in video mode triggers Spatial Video Crop dialog & worker
+    started = []
+    monkeypatch.setattr(win.video_view, "_start_job", lambda job, ok, err: started.append(job) or True)
+
+    def accept_crop(self):
+        self.preview.set_region(QRect(20, 16, 120, 90))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(VideoCropDialog, "exec", accept_crop)
+    assert win.trigger_crop_action()
+    assert len(started) == 1 and isinstance(started[0], _CropVideoWorker)
+    assert started[0].dest_path.name == "clip_crop.mp4"
+
+    # 3. End-to-end FFmpeg spatial crop verification
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("ffmpeg/ffprobe not available")
+    src = tmp_path / "src_vid.mp4"
+    dest = tmp_path / "src_vid_crop.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=duration=1:size=240x160:rate=15",
+            "-pix_fmt", "yuv420p", str(src),
+        ],
+        check=True,
+    )
+    done = []
+    worker = _CropVideoWorker(src, dest, QRect(20, 20, 120, 100), frame_size=(240, 160))
+    worker.finished.connect(done.append)
+    worker.run()
+    assert done == [dest] and dest.exists()
+    pr = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "json", str(dest)],
+        capture_output=True,
+        check=True,
+    )
+    st = json.loads(pr.stdout)["streams"][0]
+    assert (st["width"], st["height"]) == (120, 100)
+
+
+def test_video_storyboard_sheet_and_speed_ramp_export(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    from hakuview.video_tools import _SpeedRampWorker, _StoryboardWorker, build_atempo_chain
+
+    assert build_atempo_chain(1.5) == "atempo=1.5"
+    assert build_atempo_chain(4.0) == "atempo=2.0,atempo=2.0"
+    assert build_atempo_chain(0.25) == "atempo=0.5,atempo=0.5"
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    src = tmp_path / "demo_clip.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=duration=2:size=240x136:rate=15",
+            "-pix_fmt", "yuv420p", str(src),
+        ],
+        check=True,
+    )
+
+    # 1. 2x2 Storyboard Contact Sheet PNG
+    sheet_dest = tmp_path / "demo_clip_storyboard.png"
+    sb_done = []
+    sb_worker = _StoryboardWorker(src, sheet_dest, cols=2, rows=2)
+    sb_worker.finished.connect(sb_done.append)
+    sb_worker.run()
+    assert sb_done == [sheet_dest] and sheet_dest.exists()
+    sheet_img = QImage(str(sheet_dest))
+    assert not sheet_img.isNull() and sheet_img.width() > 600 and sheet_img.height() > 300
+
+    # 2. 2x Speed-Ramp Export (gracefully handles silent source clip via fallback)
+    spd_dest = tmp_path / "demo_clip_2x.mp4"
+    spd_done = []
+    spd_worker = _SpeedRampWorker(src, spd_dest, speed=2.0, source_duration_sec=2.0)
+    spd_worker.finished.connect(spd_done.append)
+    spd_worker.run()
+    assert spd_done == [spd_dest] and spd_dest.exists() and spd_dest.stat().st_size > 500
+
+
+
 
 
 

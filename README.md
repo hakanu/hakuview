@@ -63,14 +63,16 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   Type a position number or part of a file name, pick with `↑` / `↓`, press `Enter`. Handy in folders with hundreds of files.
 - 🕘 **Recent Folders**  
   The ⋯ menu lists the last 8 folders you opened (turn off with "Remember window size, position and recent folders" in Settings).
-- ✂️ **Border Crop (`C`)**  
-  Press `C` to reveal border handles on the image edges. Pull any side or corner inward and press `C` or `Enter` to crop. (Or simply left-drag a freehand box).
+- ✂️ **Border Crop + Aspect Presets (`C` on Images & Videos)**  
+  Press `C` on images to reveal border handles plus clickable aspect-ratio pills (**`Free`**, **`1:1`**, **`16:9`**, **`4:3`**, **`35×45 ID`**, **`2×2 Visa`**) and live cropped KB readout. On videos, press `C` to open **Spatial Video Crop** (`crop=w:h:x:y`) to cut out browser chrome or black bars!
+- 📄 **Government Form & Receipt Kit: Clean Document Scan (`Shift+D`) + Export to PDF (`Ctrl+P`)**  
+  Turn grey, unevenly-lit phone photos of receipts, contracts, or IDs into crisp white-paper scans (`Shift+D`), and press `Ctrl+P` to export to **PDF** (`Fit to Image`, `A4`, `US Letter`, or **`35×45 mm` 4-Up Passport ID Sheet**) with live exact `.pdf` byte size and 1-click **`🎯 Fit ≤ 200 KB` / `≤ 500 KB`** auto-tuning!
 - 🧹 **Delete / Erase / Blur Region (`Del` or `X`)**  
   Drag a box over any unwanted face, license plate, watermark, or object and press `Delete` (or press `X` to open the interactive **Erase / Redact Region** dialog for both **images** and **videos**). Choose between **🌫️ Heavy Blur**, **🟦 Pixelate / Mosaic**, **🪄 Smart Heal / Delogo** (interpolates surrounding pixels), **🎨 Surrounding Color Fill**, or **⬛ Blackout** — with optional In/Out timestamp scoping on videos.
 - 💬 **Caption / Text Overlay (`💬 Text` or `A` / `Shift+T`)**  
   Add single- or multi-line captions to both **images** and **videos** with a live preview, quick style presets (Reels Dark Pill, Light Pill, Yellow Highlight, Snapchat Full-Width Banner, Classic Impact Meme Outline, Cinema Subtitle), custom fonts & sizes, custom text/box colors & opacity, and flexible placement. Apply non-destructively to images (`Ctrl+Z` undo) or export captioned videos (`<name>_caption.mp4`, optionally scoped to marked In/Out trim points).
-- ✏️ **Quick Draw & Annotate (`D`)**  
-  Press `D` to reveal the annotation bar above the canvas with **✒ Pen**, **🖍 Neon Highlighter**, **↗ Pointer Arrow**, **▭ Rounded Box**, **◯ Circle / Ellipse**, and **╱ Line**, 1-click color swatches, and thickness slider. Undo individual strokes with `Ctrl+Z`, then press `Enter` to bake onto the image undo stack.
+- ✏️ **Quick Draw, Step Badges & Magnifier Loupe (`D`)**  
+  Press `D` to reveal the annotation bar with **✒ Pen**, **🖍 Neon Highlighter**, **↗ Pointer Arrow**, **▭ Rounded Box**, **◯ Circle**, **╱ Line**, **① Auto-Incrementing Step Badges** (`1, 2, 3...`), **🔍 2× Magnifier Loupe**, and **🔦 Spotlight Dimmer**, plus color swatches and `Ctrl+Z` stroke undo.
 - 🎨 **Eyedropper / Pixel Color Picker (`P` or `Alt+Click`)**  
   Press `P` (or hold `Alt` and click any pixel on the canvas) to sample the exact pixel color with a live floating `#HEX` + `RGB(r, g, b)` loupe, automatically copying the `#HEX` code to your clipboard and syncing it into the Draw & Annotate tool.
 - ✨ **1-Click Image Filters (`Shift+A` / `Shift+S` / `Shift+G` / `Shift+N`)**  
@@ -91,8 +93,10 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
   Click **Compress** or press `K` to save an optimized variant in the same directory (e.g. `image_lossless.png` or `image_lossless.webp`) with zero loss in quality.
 - 🎬 **Videos & Slideshows in the Same Window (`W` / `F5`)**  
   Plays MP4, MKV, WebM, MOV, and animated GIFs without switching apps. During slideshows, videos play to completion before auto-advancing.
-- ✂️ **Lossless Video Trimming (`[` / `]` or `I` / `O` + `T`)**  
-  Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, then press `T` or click **✂ Trim**. Uses instant FFmpeg stream copy with zero re-encoding and zero quality loss.
+- ✂️ **Lossless Video Trimming (`[` / `]` + `T`) & Seamless A–B Loop (`🔁 A-B`)**  
+  Scrub to any frame, press `[` (or `I`) to mark start, `]` (or `O`) to mark end, toggle **🔁 A-B** to seamlessly loop just that segment, or press `T` for instant lossless FFmpeg stream copy.
+- 🎞️ **MPC-HC / BS.Player 4×4 Video Storyboard Sheet (`Shift+S` on Video) & Timelapse Speed Export**  
+  Press `Shift+S` on any video to generate `<video>_storyboard.png` with a dark technical header + 16 evenly spaced timestamped frames, or export **`1.5×` / `2×` / `4×` / `8×` speed-ramped / timelapse MP4s** with chained pitch-preserving `atempo`.
 - 📱 **1-Click WhatsApp Web Video Export (`K` or `📱 WhatsApp`)**  
   Click **📱 WhatsApp** in the video bar (or press `K`) to export `<name>_whatsapp.mp4` with lowered H.264 + AAC bitrate (`yuv420p`, `+faststart`) guaranteed to stay under WhatsApp Web's limit.
 - 🎞️ **Video Clip → Animated GIF Export (`G` or `🎞️ GIF`)**  
@@ -118,11 +122,13 @@ HakuView also checks GitHub for a newer release when it starts (at most every 12
 | `Ctrl` / `Shift` / `Alt` + `←` / `→` | **VLC-Style Video Seek Jumps** (`Ctrl`: ±10s, `Shift`: ±5s, `Alt`: ±30s, `Ctrl+Shift`: ±60s) |
 | `Ctrl + N` | **New Empty Window** (then press `Ctrl+V` to paste a copied image and `Ctrl+S` to save with an auto-deduped filename) |
 | `Ctrl + M` | Jump to a random file (also under `⋮` More Options) |
-| `C` | **Border Crop** (drag borders inward, then press `C` or `Enter` to commit) |
+| `C` | **Border Crop** (with `35×45 ID` / `2×2 Visa` / `16:9` pills on images) or **Spatial Area Crop** on videos |
+| `Ctrl + P` | **Export Image to PDF** (`Fit`, `A4`, `Letter`, or `35×45mm` 4-Up Passport ID Sheet + `≤ 200 KB` auto-fit) |
+| `Shift + D` | **Clean Document / Receipt Scan** filter (whiten shadowed paper & sharpen text) |
 | `Del` / `Backspace` or `X` | **Delete / Erase / Blur Region** (Blur, Pixelate, Smart Heal/Delogo, or Blackout a face/object on images & videos) |
-| `D` | **Quick Draw & Annotate** (Pen, Highlighter, Arrow, Box, Circle, Line + color swatches) |
+| `D` | **Quick Draw & Annotate** (Pen, Marker, Arrow, Box, **① Step Badges**, **🔍 2× Loupe**, **🔦 Spotlight**) |
 | `P` or `Alt + Click` | **Eyedropper / Pixel Color Picker** (sample pixel color, copy `#HEX` to clipboard & sync to Draw bar) |
-| `Shift + A / S / G / N` | **Quick Image Filters** (Auto-Levels, Sharpen, Grayscale, Invert Colors) |
+| `Shift + A / S / G / N` | **Quick Image Filters** (Auto-Levels, Sharpen [Video: **4×4 Storyboard Sheet**], Grayscale, Invert) |
 | `G` | **Video → Animated GIF** (exports marked `[In, Out]` clip as a palette-optimized `.gif`) |
 | `Shift + Del` | **Move File to Trash / Recycle Bin** and advance to the next file |
 | `Ctrl + R` | **Resize / Resample Image** (by pixels, percentage, or CapCut blurred backdrop) or Reframe Video |

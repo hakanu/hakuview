@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple
 
 from PIL import Image, ImageFilter, ImageOps, JpegImagePlugin
 from PySide6.QtCore import QBuffer, QIODevice, QObject, QPointF, QRect, QRectF, QRunnable, QSize, QStandardPaths, QThreadPool, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QPolygonF, QTransform
+from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
 from .formatting import human_size
 from .proc import no_window
@@ -244,10 +244,11 @@ def stitch_images(base: QImage, other: QImage, direction: str = "horizontal") ->
 class DrawStroke:
     """A single freehand or geometric annotation stroke in image pixel coordinates."""
 
-    tool: str = "pen"  # "pen", "highlighter", "arrow", "rect", "ellipse", "line"
+    tool: str = "pen"  # "pen", "highlighter", "arrow", "rect", "ellipse", "line", "step", "loupe", "spotlight"
     color: str = "#ef4444"
     size: int = 6
     points: List[QPointF] = field(default_factory=list)
+    label: str = ""
 
 
 def render_draw_stroke(
@@ -256,6 +257,8 @@ def render_draw_stroke(
     *,
     scale: float = 1.0,
     offset: QPointF = QPointF(0.0, 0.0),
+    source_image: Optional[QImage] = None,
+    canvas_bounds: Optional[QRectF] = None,
 ) -> None:
     """Render `stroke` onto `painter`, optionally mapped from image pixels via `offset + pt * scale`."""
     if not stroke.points:
@@ -352,6 +355,80 @@ def render_draw_stroke(
             rad = min(rect.width(), rect.height()) * 0.08
             painter.drawRoundedRect(rect, rad, rad)
 
+    elif stroke.tool == "step":
+        center = pts[-1]
+        radius = max(13.0 * scale, pen_w * 2.1)
+        # Drop shadow
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 125))
+        painter.drawEllipse(QPointF(center.x() + 1.5 * scale, center.y() + 2.0 * scale), radius, radius)
+        # Colored badge + crisp white border
+        painter.setBrush(c)
+        painter.setPen(QPen(QColor(255, 255, 255, 240), max(1.6, 2.2 * scale)))
+        painter.drawEllipse(center, radius, radius)
+        # High-contrast bold number
+        luma = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+        painter.setPen(QColor("#0f172a" if luma > 165 else "#ffffff"))
+        font = QFont("Sans Serif")
+        font.setPixelSize(max(10, int(round(radius * 1.18))))
+        font.setBold(True)
+        painter.setFont(font)
+        text_rect = QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, stroke.label or "1")
+
+    elif stroke.tool == "loupe":
+        p0, p1 = pts[0], pts[-1]
+        dist = math.hypot(p1.x() - p0.x(), p1.y() - p0.y())
+        radius = max(34.0 * scale, dist if dist >= 8.0 * scale else 54.0 * scale)
+        lens_rect = QRectF(p0.x() - radius, p0.y() - radius, radius * 2.0, radius * 2.0)
+        # Subtle lens shadow
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 125))
+        painter.drawEllipse(lens_rect.translated(2.0 * scale, 3.0 * scale))
+        if source_image is not None and not source_image.isNull():
+            img_center = stroke.points[0]
+            img_radius = radius / max(1e-4, scale)
+            half_src = max(2.0, img_radius / 2.0)  # 2x magnification
+            src_rect = QRectF(
+                img_center.x() - half_src,
+                img_center.y() - half_src,
+                half_src * 2.0,
+                half_src * 2.0,
+            )
+            clip = QPainterPath()
+            clip.addEllipse(lens_rect)
+            painter.save()
+            painter.setClipPath(clip)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.fillRect(lens_rect, QColor(15, 23, 42))
+            painter.drawImage(lens_rect, source_image, src_rect)
+            painter.restore()
+        # Outer white halo + inner colored lens ring
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 230), max(2.0, pen_w * 0.85)))
+        painter.drawEllipse(lens_rect)
+        painter.setPen(QPen(c, max(1.5, pen_w * 0.55)))
+        painter.drawEllipse(lens_rect.adjusted(1.5, 1.5, -1.5, -1.5))
+
+    elif stroke.tool == "spotlight":
+        p0, p1 = pts[0], pts[-1]
+        w = abs(p1.x() - p0.x())
+        h = abs(p1.y() - p0.y())
+        if w < 8.0 * scale and h < 8.0 * scale:
+            spot_rect = QRectF(p0.x() - 48.0 * scale, p0.y() - 32.0 * scale, 96.0 * scale, 64.0 * scale)
+        else:
+            spot_rect = QRectF(min(p0.x(), p1.x()), min(p0.y(), p1.y()), max(8.0, w), max(8.0, h))
+        rad = min(spot_rect.width(), spot_rect.height()) * 0.14
+        if canvas_bounds is not None and not canvas_bounds.isEmpty():
+            outer = QPainterPath()
+            outer.addRect(canvas_bounds)
+            inner = QPainterPath()
+            inner.addRoundedRect(spot_rect, rad, rad)
+            painter.fillPath(outer.subtracted(inner), QColor(0, 0, 0, 145))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(c, max(1.8, pen_w * 0.75)))
+        painter.drawRoundedRect(spot_rect, rad, rad)
+
     painter.restore()
 
 
@@ -360,9 +437,18 @@ def apply_draw_strokes(base: QImage, strokes: List[DrawStroke]) -> QImage:
     if base is None or base.isNull() or not strokes:
         return base
     out = base.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    bounds = QRectF(0.0, 0.0, float(out.width()), float(out.height()))
     painter = QPainter(out)
     for s in strokes:
-        render_draw_stroke(painter, s, scale=1.0, offset=QPointF(0.0, 0.0))
+        snap = out.copy() if s.tool == "loupe" else base
+        render_draw_stroke(
+            painter,
+            s,
+            scale=1.0,
+            offset=QPointF(0.0, 0.0),
+            source_image=snap,
+            canvas_bounds=bounds,
+        )
     painter.end()
     if base.format() in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32):
         return out.convertToFormat(base.format())
@@ -544,6 +630,33 @@ def apply_quick_filter(image: QImage, filter_name: str) -> QImage:
         b_lut = [min(255, int(v * 0.74)) for v in range(256)]
         sepia_lut.extend(r_lut + g_lut + b_lut)
         out_rgb = Image.merge("RGB", (gray, gray, gray)).point(sepia_lut)
+    elif kind == "doc_scan":
+        from PIL import ImageChops
+
+        gray = ImageOps.grayscale(rgb)
+        w, h = max(1, gray.width), max(1, gray.height)
+        # Estimate uneven paper illumination at 1/8th scale (ultra-fast C blur, < 5ms even on 12MP)
+        small_bg = gray.resize((max(1, w // 8), max(1, h // 8)), Image.Resampling.BILINEAR)
+        small_bg = small_bg.filter(ImageFilter.GaussianBlur(radius=6))
+        bg = small_bg.resize((w, h), Image.Resampling.BILINEAR)
+        # Normalize ink against local paper brightness: (255 - bg) + gray -> uniform bright background
+        leveled = ImageChops.add(gray, ImageOps.invert(bg), scale=1.0, offset=10)
+        stretched = ImageOps.autocontrast(leveled, cutoff=1)
+        # Crisp white-paper + dark-ink S-curve LUT
+        scan_lut: List[int] = []
+        for v in range(256):
+            if v >= 205:
+                scan_lut.append(255)
+            elif v <= 55:
+                scan_lut.append(max(0, int(v * 0.45)))
+            else:
+                norm = (v - 55.0) / 150.0
+                curved = int(round(25.0 + (norm ** 0.85) * 230.0))
+                scan_lut.append(max(0, min(255, curved)))
+        cleaned = stretched.point(scan_lut).filter(
+            ImageFilter.UnsharpMask(radius=1.2, percent=135, threshold=3)
+        )
+        out_rgb = Image.merge("RGB", (cleaned, cleaned, cleaned))
     else:
         return image.copy()
 

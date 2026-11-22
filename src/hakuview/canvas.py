@@ -54,6 +54,9 @@ class ImageCanvas(QWidget):
         # Selection rectangle in image pixel coordinates
         self._selection: QRect = QRect()
         self._selection_size_hint: str = ""
+        self._crop_aspect_ratio: Optional[float] = None
+        self._crop_aspect_label: str = "Free"
+        self._crop_pill_rects: list[tuple[QRectF, str, Optional[float]]] = []
         # Floating paste overlay in image pixel coordinates
         self._overlay_image: Optional[QImage] = None
         self._overlay_rect: QRect = QRect()
@@ -165,10 +168,58 @@ class ImageCanvas(QWidget):
             self._selection_size_hint = hint
             self.update()
 
+    CROP_ASPECT_PRESETS: list[tuple[str, Optional[float]]] = [
+        ("Free", None),
+        ("1:1", 1.0),
+        ("16:9", 16.0 / 9.0),
+        ("4:3", 4.0 / 3.0),
+        ("35×45 ID", 35.0 / 45.0),
+        ("2×2 Visa", 1.0),
+    ]
+
+    @property
+    def crop_aspect_ratio(self) -> Optional[float]:
+        return self._crop_aspect_ratio
+
+    @property
+    def crop_aspect_label(self) -> str:
+        return self._crop_aspect_label
+
+    def set_crop_aspect_ratio(self, ratio: Optional[float], label: str = "Free") -> None:
+        """Lock (or unlock when `ratio` is None) the crop selection aspect ratio and fit selection."""
+        self._crop_aspect_ratio = float(ratio) if (ratio is not None and ratio > 0) else None
+        self._crop_aspect_label = label if self._crop_aspect_ratio is not None else "Free"
+        if self._image is None or self._image.isNull():
+            self.update()
+            return
+        img_w, img_h = self._image.width(), self._image.height()
+        if self._crop_aspect_ratio is not None:
+            base = self._selection if (not self._selection.isNull() and self._selection.width() >= 4) else self._image.rect()
+            cx = base.center().x()
+            cy = base.center().y()
+            target_r = self._crop_aspect_ratio
+            # Fit inside base first (or 88% of full image if full border was selected)
+            max_w = int(img_w * 0.88) if base == self._image.rect() else base.width()
+            max_h = int(img_h * 0.88) if base == self._image.rect() else base.height()
+            if max_w / max(1.0, float(max_h)) > target_r:
+                nh = max(4, min(img_h, max_h))
+                nw = max(4, min(img_w, int(round(nh * target_r))))
+            else:
+                nw = max(4, min(img_w, max_w))
+                nh = max(4, min(img_h, int(round(nw / target_r))))
+            nx = max(0, min(img_w - nw, cx - nw // 2))
+            ny = max(0, min(img_h - nh, cy - nh // 2))
+            self._selection = QRect(nx, ny, nw, nh)
+            self.selectionChanged.emit(self._selection)
+        self.update()
+
     def clear_selection(self) -> None:
-        if not self._selection.isNull() or self._selection_size_hint:
+        if not self._selection.isNull() or self._selection_size_hint or self._crop_aspect_ratio is not None:
             self._selection = QRect()
             self._selection_size_hint = ""
+            self._crop_aspect_ratio = None
+            self._crop_aspect_label = "Free"
+            self._crop_pill_rects.clear()
             self.selectionChanged.emit(QRect())
             self.update()
 
@@ -176,6 +227,8 @@ class ImageCanvas(QWidget):
         if self._image is not None and not self._image.isNull():
             self._selection = self._image.rect()
             self._selection_size_hint = ""
+            self._crop_aspect_ratio = None
+            self._crop_aspect_label = "Free"
             self.selectionChanged.emit(self._selection)
             self.update()
 
@@ -477,9 +530,23 @@ class ImageCanvas(QWidget):
         if self._draw_strokes or self._active_stroke is not None:
             offset = target_rect.topLeft()
             for stroke in self._draw_strokes:
-                render_draw_stroke(painter, stroke, scale=self._scale, offset=offset)
+                render_draw_stroke(
+                    painter,
+                    stroke,
+                    scale=self._scale,
+                    offset=offset,
+                    source_image=self._image,
+                    canvas_bounds=target_rect,
+                )
             if self._active_stroke is not None:
-                render_draw_stroke(painter, self._active_stroke, scale=self._scale, offset=offset)
+                render_draw_stroke(
+                    painter,
+                    self._active_stroke,
+                    scale=self._scale,
+                    offset=offset,
+                    source_image=self._image,
+                    canvas_bounds=target_rect,
+                )
 
         # Draw crop selection rectangle & HUD if active
         if not self._selection.isNull() and self._selection.width() > 0 and self._selection.height() > 0:
@@ -603,6 +670,30 @@ class ImageCanvas(QWidget):
         painter.drawRoundedRect(badge_rect, 5, 5)
         painter.setPen(QColor(241, 245, 249))
         painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+
+        # Aspect-ratio preset pills (clickable right on the Crop HUD, zero widget overhead)
+        self._crop_pill_rects.clear()
+        pill_font = QFont(self.font())
+        pill_font.setPointSize(8)
+        pill_font.setBold(True)
+        painter.setFont(pill_font)
+        pfm = painter.fontMetrics()
+        pill_h = pfm.height() + 8
+        py = badge_rect.bottom() + 4.0
+        if py + pill_h > self.height() - 6.0:
+            py = max(6.0, badge_rect.top() - pill_h - 4.0)
+        px = bx
+        for label, ratio in self.CROP_ASPECT_PRESETS:
+            pw = pfm.horizontalAdvance(label) + 14
+            prect = QRectF(px, py, pw, pill_h)
+            active = label == self._crop_aspect_label
+            painter.setBrush(QColor(2, 132, 199, 235) if active else QColor(15, 23, 42, 220))
+            painter.setPen(QPen(QColor(56, 189, 248, 230 if active else 120), 1.2 if active else 1.0))
+            painter.drawRoundedRect(prect, 4, 4)
+            painter.setPen(QColor(248, 250, 252) if active else QColor(203, 213, 225))
+            painter.drawText(prect, Qt.AlignmentFlag.AlignCenter, label)
+            self._crop_pill_rects.append((prect, label, ratio))
+            px += pw + 5.0
 
     def _draw_floating_overlay(self, painter: QPainter) -> None:
         if not self.has_overlay or self._overlay_image is None:
@@ -839,14 +930,26 @@ class ImageCanvas(QWidget):
             if self._draw_mode:
                 self._drag_mode = "draw"
                 img_pt = self.widget_to_image(pos, clamp=True)
+                step_lbl = (
+                    str(1 + sum(1 for s in self._draw_strokes if s.tool == "step"))
+                    if self._draw_tool == "step"
+                    else ""
+                )
                 self._active_stroke = DrawStroke(
                     tool=self._draw_tool,
                     color=self._draw_color,
                     size=self._draw_size,
                     points=[QPointF(img_pt)],
+                    label=step_lbl,
                 )
                 self.update()
                 return
+
+            if not self.has_overlay and not self._selection.isNull() and self._crop_pill_rects:
+                for prect, plabel, pratio in self._crop_pill_rects:
+                    if prect.contains(pos):
+                        self.set_crop_aspect_ratio(pratio, plabel)
+                        return
 
             if self.has_overlay:
                 hit = self._hit_test_rect(self._overlay_rect, pos, is_overlay=True)
@@ -938,7 +1041,13 @@ class ImageCanvas(QWidget):
             y1 = min(self._drag_start_image.y(), cur_img_pt.y())
             x2 = max(self._drag_start_image.x(), cur_img_pt.x())
             y2 = max(self._drag_start_image.y(), cur_img_pt.y())
-            self._selection = QRect(x1, y1, x2 - x1, y2 - y1)
+            w, h = x2 - x1, y2 - y1
+            if self._crop_aspect_ratio is not None and w > 0 and h > 0:
+                h = max(2, int(round(w / self._crop_aspect_ratio)))
+                if y1 + h > img_h:
+                    h = max(2, img_h - y1)
+                    w = max(2, int(round(h * self._crop_aspect_ratio)))
+            self._selection = QRect(x1, y1, w, h)
         elif self._drag_mode == "move":
             dx = cur_img_pt.x() - self._drag_start_image.x()
             dy = cur_img_pt.y() - self._drag_start_image.y()
@@ -957,12 +1066,19 @@ class ImageCanvas(QWidget):
                 top = min(cur_img_pt.y(), bottom - 2)
             if "s" in self._drag_mode:
                 bottom = max(cur_img_pt.y(), top + 2)
-            self._selection = QRect(
-                max(0, left),
-                max(0, top),
-                min(img_w, right) - max(0, left),
-                min(img_h, bottom) - max(0, top),
-            )
+            left = max(0, left)
+            top = max(0, top)
+            w = max(2, min(img_w, right) - left)
+            h = max(2, min(img_h, bottom) - top)
+            if self._crop_aspect_ratio is not None:
+                ar = self._crop_aspect_ratio
+                if self._drag_mode in ("n", "s"):
+                    w = max(2, min(img_w - left, int(round(h * ar))))
+                    h = max(2, min(img_h - top, int(round(w / ar))))
+                else:
+                    h = max(2, min(img_h - top, int(round(w / ar))))
+                    w = max(2, min(img_w - left, int(round(h * ar))))
+            self._selection = QRect(left, top, w, h)
 
         self.selectionChanged.emit(self._selection)
         self.update()

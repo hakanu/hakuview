@@ -235,6 +235,9 @@ DRAW_TOOLS: list[tuple[str, str, str]] = [
     ("▭ Box", "rect", "Rounded rectangle callout"),
     ("◯ Circle", "ellipse", "Circle / ellipse callout"),
     ("╱ Line", "line", "Straight line segment"),
+    ("① Step", "step", "Click to drop auto-incrementing numbered step callouts (1, 2, 3...)"),
+    ("🔍 Loupe", "loupe", "Click or drag outward to place a 2× Magnifier Loupe"),
+    ("🔦 Spot", "spotlight", "Drag a Spotlight box that dims everything outside"),
 ]
 
 DRAW_SWATCHES: list[tuple[str, str]] = [
