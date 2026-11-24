@@ -22,7 +22,6 @@ from PySide6.QtGui import (
     QKeyEvent,
     QKeySequence,
 )
-from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -52,7 +51,7 @@ from . import __app_name__, __version__, dialogs, display_version
 from .canvas import ImageCanvas
 from .color_bar import ColorAdjustBar, DrawAnnotateBar, PasteOverlayBar
 from .folder_scanner import SORT_MODES, SUPPORTED_EXTENSIONS, FolderNavigator, is_video_file
-from .formatting import human_size
+from .formatting import format_ms as _format_ms, human_size
 from .image_ops import (
     COMPRESSION_MODES,
     CompressionError,
@@ -75,15 +74,11 @@ from .image_ops import (
     save_qimage_atomic,
     strip_image_metadata,
 )
-from .goto_dialog import GoToFileDialog
-from .info_dialog import MediaInfoDialog
 from .installer import ensure_hakuview_ico
 from .proc import gui_python
 from .settings import AppSettings
-from .settings_dialog import SettingsDialog
 from . import theme
 from .updater import RELEASES_URL, UpdateChecker, UpdateRunner, UpdateSettings, can_self_update, is_newer
-from .video_view import VideoPlayerWidget, _format_ms
 from .widgets import FullscreenControls, chevron_icon, menu_position_under, three_dots_icon
 
 
@@ -126,11 +121,10 @@ class HakuViewWindow(QMainWindow):
         self.slideshow_timer.timeout.connect(self._on_slideshow_tick)
 
         theme.set_theme(self.app_settings.theme)
+        self._video_view = None
         self._build_ui()
         self._build_shortcuts()
         self.apply_settings()
-        self.video_view.set_volume(self.app_settings.video_volume)
-        self.video_view.set_muted(self.app_settings.video_muted)
         # Follow the desktop's light/dark switch live when the theme is "system".
         QGuiApplication.styleHints().colorSchemeChanged.connect(self._on_system_color_scheme_changed)
 
@@ -200,7 +194,8 @@ class HakuViewWindow(QMainWindow):
         self.set_compression_mode(s.compression_mode)
         self.spin_interval.setValue(self.slideshow_interval_sec)
         self.chk_shuffle.setChecked(s.slideshow_shuffle)
-        self.video_view.loop = s.video_loop
+        if self._video_view is not None:
+            self._video_view.loop = s.video_loop
 
     def apply_theme(self) -> None:
         theme.set_theme(self.app_settings.theme)
@@ -217,6 +212,8 @@ class HakuViewWindow(QMainWindow):
             self.apply_theme()
 
     def show_settings_dialog(self) -> None:
+        from .settings_dialog import SettingsDialog
+
         dlg = SettingsDialog(self.app_settings, self.update_settings, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.slideshow_interval_sec = self.app_settings.slideshow_interval
@@ -231,8 +228,9 @@ class HakuViewWindow(QMainWindow):
 
     def _save_session(self) -> None:
         s = self.app_settings
-        s.video_volume = self.video_view.volume
-        s.video_muted = self.video_view.audio.isMuted()
+        if self._video_view is not None:
+            s.video_volume = self._video_view.volume
+            s.video_muted = self._video_view.audio.isMuted()
         s.slideshow_interval = self.slideshow_interval_sec
         s.slideshow_shuffle = self.slideshow_random
         if s.remember_session:
@@ -245,13 +243,48 @@ class HakuViewWindow(QMainWindow):
     # UI Construction
     # ------------------------------------------------------------------
 
+    @property
+    def video_view(self):
+        """Lazily import QtMultimedia and construct VideoPlayerWidget on first video access (~130ms boot win)."""
+        if self._video_view is None:
+            from .video_view import VideoPlayerWidget
+
+            vv = VideoPlayerWidget(self)
+            vv.set_volume(self.app_settings.video_volume)
+            vv.set_muted(self.app_settings.video_muted)
+            vv.loop = self.app_settings.video_loop
+            vv.doubleClicked.connect(self.toggle_fullscreen)
+            vv.videoFinished.connect(self._on_video_finished_in_slideshow)
+            vv.transcodeCompleted.connect(self._on_video_transcoded)
+            vv.trimCompleted.connect(self._on_video_trimmed)
+            vv.whatsappCompleted.connect(self._on_video_whatsapp_done)
+            vv.gifCompleted.connect(self._on_video_gif_done)
+            vv.resizeCompleted.connect(self._on_video_resized)
+            vv.transformCompleted.connect(self._on_video_transformed)
+            vv.stripAudioCompleted.connect(self._on_video_audio_stripped)
+            vv.captionCompleted.connect(self._on_video_captioned)
+            vv.eraseCompleted.connect(self._on_video_erased)
+            vv.videoCropCompleted.connect(self._on_video_cropped)
+            vv.storyboardCompleted.connect(self._on_video_storyboard_done)
+            vv.speedExportCompleted.connect(self._on_video_speed_done)
+            vv.colorExportCompleted.connect(self._on_color_export_done)
+            vv.colorExportFailed.connect(self._on_color_export_failed)
+            vv.jobStarted.connect(self._on_bg_job_started)
+            vv.jobProgress.connect(self._on_bg_job_progress)
+            vv.jobEnded.connect(self._on_bg_job_ended)
+            vv.jobCancelled.connect(self._on_bg_job_cancelled)
+            vv.infoRequested.connect(self.show_media_info_dialog)
+            vv.screencapRequested.connect(self.save_video_screencap)
+            vv.playbackFailed.connect(lambda msg: self.status.showMessage(f"⚠ {msg}", 8000))
+            self.stack.addWidget(vv)
+            self._video_view = vv
+        return self._video_view
+
     def _build_ui(self) -> None:
-        # Central stacked widget switching between ImageCanvas and VideoPlayerWidget
+        # Central stacked widget switching between ImageCanvas and lazy VideoPlayerWidget
         self.stack = QStackedWidget(self)
         self.canvas = ImageCanvas(self)
-        self.video_view = VideoPlayerWidget(self)
         self.stack.addWidget(self.canvas)
-        self.stack.addWidget(self.video_view)
 
         self.color_bar = ColorAdjustBar(self)
         self.color_bar.changed.connect(self._on_color_changed)
@@ -287,29 +320,6 @@ class HakuViewWindow(QMainWindow):
         self.canvas.drawModeChanged.connect(self._on_draw_mode_changed)
         self.canvas.colorPicked.connect(self._on_color_picked)
         self.canvas.doubleClicked.connect(self.toggle_fullscreen)
-        self.video_view.doubleClicked.connect(self.toggle_fullscreen)
-        self.video_view.videoFinished.connect(self._on_video_finished_in_slideshow)
-        self.video_view.transcodeCompleted.connect(self._on_video_transcoded)
-        self.video_view.trimCompleted.connect(self._on_video_trimmed)
-        self.video_view.whatsappCompleted.connect(self._on_video_whatsapp_done)
-        self.video_view.gifCompleted.connect(self._on_video_gif_done)
-        self.video_view.resizeCompleted.connect(self._on_video_resized)
-        self.video_view.transformCompleted.connect(self._on_video_transformed)
-        self.video_view.stripAudioCompleted.connect(self._on_video_audio_stripped)
-        self.video_view.captionCompleted.connect(self._on_video_captioned)
-        self.video_view.eraseCompleted.connect(self._on_video_erased)
-        self.video_view.videoCropCompleted.connect(self._on_video_cropped)
-        self.video_view.storyboardCompleted.connect(self._on_video_storyboard_done)
-        self.video_view.speedExportCompleted.connect(self._on_video_speed_done)
-        self.video_view.colorExportCompleted.connect(self._on_color_export_done)
-        self.video_view.colorExportFailed.connect(self._on_color_export_failed)
-        self.video_view.jobStarted.connect(self._on_bg_job_started)
-        self.video_view.jobProgress.connect(self._on_bg_job_progress)
-        self.video_view.jobEnded.connect(self._on_bg_job_ended)
-        self.video_view.jobCancelled.connect(self._on_bg_job_cancelled)
-        self.video_view.infoRequested.connect(self.show_media_info_dialog)
-        self.video_view.screencapRequested.connect(self.save_video_screencap)
-        self.video_view.playbackFailed.connect(lambda msg: self.status.showMessage(f"⚠ {msg}", 8000))
         self.canvas.wheelNavigate.connect(lambda step: self.next_item() if step > 0 else self.prev_item())
 
         # Compact Top Toolbar
@@ -1115,6 +1125,8 @@ class HakuViewWindow(QMainWindow):
         if self.navigator.count == 0:
             self.status.showMessage("Open a file or folder first.", 2500)
             return None
+        from .goto_dialog import GoToFileDialog
+
         dlg = GoToFileDialog(self.navigator.files, self.navigator.index, self)
         if dlg.exec() != QDialog.DialogCode.Accepted or dlg.selected_index is None:
             return None
@@ -1165,7 +1177,8 @@ class HakuViewWindow(QMainWindow):
         current = self.navigator.current_file
         if current is None:
             self.document = None
-            self.video_view.stop()
+            if self._video_view is not None:
+                self._video_view.stop()
             self.canvas.set_image(None)
             self.stack.setCurrentWidget(self.canvas)
             self._update_ui_state()
@@ -1184,7 +1197,8 @@ class HakuViewWindow(QMainWindow):
 
         # Image file
         self.current_is_video = False
-        self.video_view.stop()
+        if self._video_view is not None:
+            self._video_view.stop()
         self.stack.setCurrentWidget(self.canvas)
 
         qimg = self.cache.get(current)
@@ -1324,7 +1338,8 @@ class HakuViewWindow(QMainWindow):
         """Load `image` as the base canvas image in an empty window (unsaved until Ctrl+S)."""
         if image is None or image.isNull():
             return False
-        self.video_view.stop()
+        if self._video_view is not None:
+            self._video_view.stop()
         self.current_is_video = False
         self.stack.setCurrentWidget(self.canvas)
         self.reset_color_adjustments(update_view=False)
@@ -2345,7 +2360,8 @@ class HakuViewWindow(QMainWindow):
 
         self.slideshow_active = active
         self.btn_slideshow.setChecked(active)
-        self.video_view.set_slideshow_mode(active)
+        if self._video_view is not None:
+            self._video_view.set_slideshow_mode(active)
 
         if active:
             self.btn_slideshow.setText("⏹ Stop")
@@ -2365,6 +2381,8 @@ class HakuViewWindow(QMainWindow):
             return
         interval_ms = int(self.slideshow_interval_sec * 1000)
         if self.current_is_video:
+            from PySide6.QtMultimedia import QMediaPlayer
+
             if self.video_view.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
                 self.video_view.player.play()
             dur = self.video_view.player.duration()
@@ -2516,7 +2534,7 @@ class HakuViewWindow(QMainWindow):
         QApplication.processEvents()
 
     def _end_busy_status(self) -> None:
-        if not self.video_view.is_job_running():
+        if self._video_view is None or not self._video_view.is_job_running():
             self.lbl_progress.setVisible(False)
             self.status_progress.setVisible(False)
 
@@ -2571,6 +2589,8 @@ class HakuViewWindow(QMainWindow):
         if cur is None or not cur.exists():
             self.status.showMessage("No file loaded to inspect.", 3000)
             return
+        from .info_dialog import MediaInfoDialog
+
         dlg = MediaInfoDialog(cur, self)
         dlg.exec()
 
@@ -2784,8 +2804,9 @@ class HakuViewWindow(QMainWindow):
             event.ignore()
             return
         self._save_session()
-        self.video_view.stop()
-        self.video_view.shutdown()
+        if self._video_view is not None:
+            self._video_view.stop()
+            self._video_view.shutdown()
         _OPEN_WINDOWS.discard(self)
         super().closeEvent(event)
 

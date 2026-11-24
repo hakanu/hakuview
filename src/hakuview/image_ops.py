@@ -14,27 +14,44 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
-from PIL import Image, ImageFilter, ImageOps, JpegImagePlugin
 from PySide6.QtCore import QBuffer, QIODevice, QObject, QPointF, QRect, QRectF, QRunnable, QSize, QStandardPaths, QThreadPool, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QImageWriter, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
 from .formatting import human_size
 from .proc import no_window
 
+_PIL_LOADED = False
+Image: Any = None
+ImageFilter: Any = None
+ImageOps: Any = None
+JpegImagePlugin: Any = None
 
-def _register_optional_plugins() -> None:
-    """Enable HEIC/HEIF decoding through Pillow when the optional pillow-heif package is installed."""
+
+def _ensure_pil() -> None:
+    """Lazy-import Pillow (and optional pillow-heif) on first use so photo launches skip ~35ms of boot cost."""
+    global _PIL_LOADED, Image, ImageFilter, ImageOps, JpegImagePlugin
+    if _PIL_LOADED:
+        return
+    from PIL import (
+        Image as _Image,
+        ImageFilter as _ImageFilter,
+        ImageOps as _ImageOps,
+        JpegImagePlugin as _JpegImagePlugin,
+    )
+
+    Image = _Image
+    ImageFilter = _ImageFilter
+    ImageOps = _ImageOps
+    JpegImagePlugin = _JpegImagePlugin
+    _PIL_LOADED = True
     try:
         import pillow_heif  # type: ignore[import-not-found]
 
         pillow_heif.register_heif_opener()
     except Exception:
         pass
-
-
-_register_optional_plugins()
 
 
 def describe_load_failure(path: Path | str) -> str:
@@ -53,6 +70,7 @@ def describe_load_failure(path: Path | str) -> str:
                 "HEIC images need the optional 'pillow-heif' package.\n"
                 "Install it with:  uv tool install --force --with pillow-heif git+https://github.com/hakanu/hakuview.git"
             )
+    _ensure_pil()
     try:
         with Image.open(p) as im:
             im.load()
@@ -74,6 +92,7 @@ def load_qimage_fast(path: Path | str) -> Optional[QImage]:
         return image
 
     # Fallback to Pillow for exotic formats (e.g. certain TIFF/WebP/AVIF/HEIC/ICO files)
+    _ensure_pil()
     try:
         with Image.open(file_path) as pil_img:
             pil_img = ImageOps.exif_transpose(pil_img)
@@ -92,8 +111,13 @@ def load_qimage_fast(path: Path | str) -> Optional[QImage]:
         return None
 
 
+_ANIMATABLE_EXTENSIONS = frozenset({".gif", ".webp", ".apng"})
+
+
 def is_animated_image(path: Path | str) -> bool:
     """True if the file holds more than one frame (animated GIF / WebP / APNG)."""
+    if Path(path).suffix.lower() not in _ANIMATABLE_EXTENSIONS:
+        return False
     reader = QImageReader(str(path))
     return reader.supportsAnimation() and reader.imageCount() > 1
 
@@ -552,6 +576,7 @@ def save_qimage_atomic(image: QImage, target_path: Path | str, quality: int = 95
         ok = writer.write(image)
         if not ok:
             # Fallback to Pillow writer
+            _ensure_pil()
             buffer_img = image.convertToFormat(QImage.Format.Format_RGBA8888)
             ptr = buffer_img.constBits()
             pil_img = Image.frombuffer(
@@ -587,6 +612,7 @@ def save_qimage_atomic(image: QImage, target_path: Path | str, quality: int = 95
 
 def _qimage_to_pil(image: QImage) -> Image.Image:
     """Convert a QImage into a detached Pillow RGBA Image."""
+    _ensure_pil()
     rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
     width, height = rgba.width(), rgba.height()
     bpl = rgba.bytesPerLine()
@@ -669,6 +695,7 @@ def strip_image_metadata(doc: "ImageDocument", in_place: bool = False) -> Tuple[
 
     Returns `(output_path, stripped_tag_count)`.
     """
+    _ensure_pil()
     src_path = doc.path
     tag_count = 0
     try:
@@ -714,6 +741,7 @@ _IDENTITY_LUT = list(range(256))
 
 def apply_color_lut(image: QImage, lut: List[int]) -> QImage:
     """Map R, G and B through `lut` (alpha untouched). Fast enough for live video frames."""
+    _ensure_pil()
     rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
     w, h = rgba.width(), rgba.height()
     pil_img = Image.frombuffer("RGBA", (w, h), rgba.constBits(), "raw", "RGBA", rgba.bytesPerLine(), 1)
@@ -839,6 +867,7 @@ def _jpegtran_optimize(src_path: Path, out_path: Path) -> None:
 
 def _save_jpeg_like_source(image: Image.Image, src_path: Optional[Path], out_target) -> None:
     """Encode `image` as JPEG with the same quantization tables/subsampling as `src_path`."""
+    _ensure_pil()
     kwargs: dict = {"quality": 95}
     if src_path is not None:
         try:
@@ -1257,6 +1286,7 @@ class ImageDocument:
 
 
 def _exif_orientation(path: Path) -> int:
+    _ensure_pil()
     try:
         with Image.open(path) as im:
             return int(im.getexif().get(0x0112, 1) or 1)
